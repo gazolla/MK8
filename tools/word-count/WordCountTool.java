@@ -27,11 +27,15 @@ public class WordCountTool {
 
     public static void main(String[] args) throws Exception {
         Event.initLogging();
-        System.out.println("[WORD-COUNT] Starting (on-demand)...");
-        BasePlugin.run("plugin.json", Event.DEFAULT_SOCKET, WordCountTool::handle);
+        new WordCountTool().start();
     }
 
-    static void handle(String json, OutputStream out) throws Exception {
+    void start() throws Exception {
+        System.out.println("[WORD-COUNT] Starting (on-demand)...");
+        BasePlugin.run("plugin.json", Event.DEFAULT_SOCKET, this::handle);
+    }
+
+    void handle(String json, OutputStream out) throws Exception {
         Event event = Event.MAPPER.readValue(json, Event.class);
 
         // Only handle our trigger event
@@ -91,7 +95,7 @@ public class WordCountTool {
                 + " sentences=" + sentenceCount + " unique=" + freq.size());
     }
 
-    static void publishError(Event origin, String reason, OutputStream out) {
+    void publishError(Event origin, String reason, OutputStream out) {
         try {
             String payload = Event.MAPPER.writeValueAsString(Map.of("reason", reason));
             BasePlugin.publish(

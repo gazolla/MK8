@@ -35,7 +35,7 @@ import java.util.concurrent.*;
 public class DemoRunner {
 
     // Tracks in-flight requests: correlationId → sample label
-    static final ConcurrentHashMap<String, String> pending = new ConcurrentHashMap<>();
+    final ConcurrentHashMap<String, String> pending = new ConcurrentHashMap<>();
 
     // Sample texts to analyze
     static final String[][] SAMPLES = {
@@ -57,10 +57,11 @@ public class DemoRunner {
     };
 
     // Counts how many results we've received (2 for collapsing, 1 for sequential cache hit)
-    static final CountDownLatch latch = new CountDownLatch(3);
+    final CountDownLatch latch = new CountDownLatch(3);
 
     // Safeguard to ensure the test suite is executed exactly once
-    private static final java.util.concurrent.atomic.AtomicBoolean testStarted = new java.util.concurrent.atomic.AtomicBoolean(false);
+    private final java.util.concurrent.atomic.AtomicBoolean testStarted =
+            new java.util.concurrent.atomic.AtomicBoolean(false);
 
     public static void main(String[] args) throws Exception {
         Event.initLogging();
@@ -69,21 +70,26 @@ public class DemoRunner {
         System.out.println("║  3 plugins: DemoRunner → SummaryAgent → WordCount    ║");
         System.out.println("╚══════════════════════════════════════════════════════╝");
         System.out.println();
+        new DemoRunner().start();
+    }
 
-        BasePlugin.run("plugin.json", Event.DEFAULT_SOCKET, (json, out) -> {
-            Event event = Event.MAPPER.readValue(json, Event.class);
-            switch (event.type()) {
-                case "plugin.ready"          -> handleReady(event, out);
-                case "capability.result"     -> handleResult(event, out);
-                case "capability.error"      -> handleError(event, out);
-                case "system.plugin.spawned" -> handleSpawned(event, out);
-            }
-        });
+    void start() throws Exception {
+        BasePlugin.run("plugin.json", Event.DEFAULT_SOCKET, this::handle);
+    }
+
+    void handle(String json, OutputStream out) throws Exception {
+        Event event = Event.MAPPER.readValue(json, Event.class);
+        switch (event.type()) {
+            case "plugin.ready"          -> handleReady(event, out);
+            case "capability.result"     -> handleResult(event, out);
+            case "capability.error"      -> handleError(event, out);
+            case "system.plugin.spawned" -> handleSpawned(event, out);
+        }
     }
 
     // ── On ready: wait a bit then fire all requests ───────────────────────────
 
-    static void handleReady(Event event, OutputStream out) throws Exception {
+    void handleReady(Event event, OutputStream out) throws Exception {
         // Enforce single execution check to prevent duplicate triggers from other plugins' ready events
         if (!testStarted.compareAndSet(false, true)) {
             return;
@@ -142,7 +148,7 @@ public class DemoRunner {
 
     // ── Send all sample texts as concurrent capability.invoke calls ───────────
 
-    static void sendAllRequests(OutputStream out) throws Exception {
+    void sendAllRequests(OutputStream out) throws Exception {
         System.out.println("[DEMO] === STARTING IDEMPOTENCY & COLLAPSING TEST ===\n");
         String label = "haiku_collapsed";
         String text  = "An old silent pond a frog jumps into the pond splash silence again.";
@@ -172,7 +178,7 @@ public class DemoRunner {
 
     // ── Handle capability.result ──────────────────────────────────────────────
 
-    static void handleResult(Event event, OutputStream out) throws Exception {
+    void handleResult(Event event, OutputStream out) throws Exception {
         String corrId = event.correlationId();
         String label  = pending.get(corrId); // use get instead of remove so both print
         if (label == null) return;
@@ -219,7 +225,7 @@ public class DemoRunner {
 
     // ── Handle capability.error ───────────────────────────────────────────────
 
-    static void handleError(Event event, OutputStream out) throws Exception {
+    void handleError(Event event, OutputStream out) throws Exception {
         String corrId = event.correlationId();
         String label  = pending.get(corrId);
         if (label == null) return;
@@ -231,7 +237,7 @@ public class DemoRunner {
 
     // ── Observe on-demand plugin lifecycle ────────────────────────────────────
 
-    static void handleSpawned(Event event, OutputStream out) throws Exception {
+    void handleSpawned(Event event, OutputStream out) throws Exception {
         JsonNode p = Event.MAPPER.readTree(event.payload());
         String pluginId = p.has("pluginId") ? p.get("pluginId").asText()
                         : p.path("agentId").asText("?");

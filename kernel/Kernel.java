@@ -22,7 +22,7 @@ import java.util.List;
 import java.util.concurrent.*;
 
 /**
- * MK7 Kernel — plugin-agnostic UDS event bus.
+ * MK8 Kernel — plugin-agnostic UDS event bus.
  *
  * Routing tables (built at runtime from plugin.register):
  *   exactRoutes   — event.type  → List<Connection>  (O(1) dispatch)
@@ -35,25 +35,33 @@ import java.util.concurrent.*;
  */
 public class Kernel {
 
+    // True constant — socket path is fixed for the whole JVM lifetime.
     static final Path SOCKET_PATH = Path.of("/tmp/mk7/kernel.sock");
 
-    static final ConcurrentHashMap<String, CopyOnWriteArrayList<Connection>> exactRoutes  = new ConcurrentHashMap<>();
-    static final CopyOnWriteArrayList<PrefixRoute>                           prefixRoutes  = new CopyOnWriteArrayList<>();
-    static final ConcurrentHashMap<String, Connection>                       byPluginId    = new ConcurrentHashMap<>();
-    static final ConcurrentHashMap<String, String>                           pendingRoutes = new ConcurrentHashMap<>();
+    // ── Instance-owned routing tables ────────────────────────────────────────
+    final ConcurrentHashMap<String, CopyOnWriteArrayList<Connection>> exactRoutes  = new ConcurrentHashMap<>();
+    final CopyOnWriteArrayList<PrefixRoute>                           prefixRoutes  = new CopyOnWriteArrayList<>();
+    final ConcurrentHashMap<String, Connection>                       byPluginId    = new ConcurrentHashMap<>();
+    final ConcurrentHashMap<String, String>                           pendingRoutes = new ConcurrentHashMap<>();
 
-    static final ExecutorService readers = Executors.newVirtualThreadPerTaskExecutor();
+    final ExecutorService readers = Executors.newVirtualThreadPerTaskExecutor();
 
     // ── Option B: Kernel-Extendido fields ─────────────────────────────────────
-    // Populated once in main(); immutable after that. null until boot completes.
-    static volatile List<EventInterceptor> interceptors;
+    // Populated once in start(); immutable after that. null until boot completes.
+    volatile List<EventInterceptor> interceptors;
     // Synthetic source Connection used when bus.route() re-enters the kernel pipeline.
     // channel=null — writer thread is NOT started (guarded in Connection constructor).
-    static final Connection KERNEL_SOURCE = new Connection("kernel", null);
+    final Connection KERNEL_SOURCE = new Connection("kernel", null);
+
+    // ── Entry point ───────────────────────────────────────────────────────────
 
     public static void main(String[] args) throws Exception {
         Event.initLogging();
-        System.out.println("[KERNEL] Starting MK7...");
+        new Kernel().start();
+    }
+
+    void start() throws Exception {
+        System.out.println("[KERNEL] Starting MK8...");
 
         Files.createDirectories(SOCKET_PATH.getParent());
         Files.deleteIfExists(SOCKET_PATH);
@@ -69,16 +77,16 @@ public class Kernel {
             }));
 
             // ── Option B boot — wire CapabilityIndex + ProcessManager ──────────
-            Path mk7Root = findProjectRoot();
-            System.out.println("[KERNEL] Project root: " + mk7Root);
+            Path mk8Root = findProjectRoot();
+            System.out.println("[KERNEL] Project root: " + mk8Root);
 
-            var catalog = new PluginCatalog(mk7Root);
+            var catalog = new PluginCatalog(mk8Root);
             Thread.ofVirtual().start(catalog::scan);   // background scan; doesn't block accept
 
-            var bus     = new KernelBusImpl();
+            var bus         = new KernelBusImpl(this);
             var idempotency = new IdempotencyInterceptor(bus);
-            var capIdx  = new CapabilityIndex(catalog, bus);
-            var procMgr = new ProcessManager(catalog, bus, mk7Root);
+            var capIdx      = new CapabilityIndex(catalog, bus);
+            var procMgr     = new ProcessManager(catalog, bus, mk8Root);
             capIdx.setProcessManager(procMgr);         // P1: wire trackUsage callback
             interceptors = List.of(idempotency, capIdx, procMgr);   // immutable after this point
             // ─────────────────────────────────────────────────────────────────────
@@ -92,7 +100,7 @@ public class Kernel {
 
     // ── Client handler (one virtual thread per plugin) ────────────────────────
 
-    static void handleClient(SocketChannel channel) {
+    void handleClient(SocketChannel channel) {
         Connection conn = null;
         try {
             InputStream  in  = Channels.newInputStream(channel);
@@ -116,7 +124,7 @@ public class Kernel {
 
     // ── Registration ──────────────────────────────────────────────────────────
 
-    static Connection register(Event event, SocketChannel channel) throws Exception {
+    Connection register(Event event, SocketChannel channel) throws Exception {
         Event.PluginConfig config = Event.MAPPER.readValue(event.payload(), Event.PluginConfig.class);
         Connection conn = new Connection(config.id(), channel);
 
@@ -140,7 +148,7 @@ public class Kernel {
         return conn;
     }
 
-    static void unregister(Connection conn) {
+    void unregister(Connection conn) {
         byPluginId.remove(conn.pluginId);
         exactRoutes.values().forEach(list -> list.remove(conn));
         prefixRoutes.removeIf(pr -> pr.conn() == conn);
@@ -150,7 +158,7 @@ public class Kernel {
 
     // ── Routing ───────────────────────────────────────────────────────────────
 
-    static void route(Event event, String json, Connection source) {
+    void route(Event event, String json, Connection source) {
         String type = event.type();
 
         // Direct: message.{targetId}
@@ -260,7 +268,7 @@ public class Kernel {
 
     // ── Writer queue ──────────────────────────────────────────────────────────
 
-    static void enqueue(Connection conn, String json) {
+    void enqueue(Connection conn, String json) {
         try {
             byte[] frame = buildFrame(json);
             conn.writeQueue.put(frame);
@@ -288,7 +296,7 @@ public class Kernel {
      *
      * Falls back to user.dir if nothing is found (e.g., when run from kernel/ directly).
      */
-    static Path findProjectRoot() {
+    Path findProjectRoot() {
         Path p = Path.of(System.getProperty("user.dir")).toAbsolutePath().normalize();
         while (p != null) {
             if (Files.exists(p.resolve("kernel")) || Files.exists(p.resolve("Start.java"))) {
@@ -368,12 +376,18 @@ interface KernelBus {
     void removePendingRoute(String corrId);
 }
 
-/** Concrete KernelBus backed by the Kernel's static routing tables. */
+/** Concrete KernelBus backed by a Kernel instance. */
 class KernelBusImpl implements KernelBus {
+    private final Kernel kernel;
+
+    KernelBusImpl(Kernel kernel) {
+        this.kernel = kernel;
+    }
+
     @Override
     public void sendTo(String pluginId, String json) {
-        Connection c = Kernel.byPluginId.get(pluginId);
-        if (c != null) Kernel.enqueue(c, json);
+        Connection c = kernel.byPluginId.get(pluginId);
+        if (c != null) kernel.enqueue(c, json);
         else System.err.println("[KERNEL-BUS] No connection for direct send: " + pluginId);
     }
 
@@ -382,11 +396,11 @@ class KernelBusImpl implements KernelBus {
         // Re-serialise the event and push through the full routing pipeline.
         // KERNEL_SOURCE is used so pendingRoutes can record "kernel" as the sender.
         String json = Event.MAPPER.writeValueAsString(event);
-        Kernel.route(event, json, Kernel.KERNEL_SOURCE);
+        kernel.route(event, json, kernel.KERNEL_SOURCE);
     }
 
     @Override
     public void removePendingRoute(String corrId) {
-        Kernel.pendingRoutes.remove(corrId);
+        kernel.pendingRoutes.remove(corrId);
     }
 }

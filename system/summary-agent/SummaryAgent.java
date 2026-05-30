@@ -47,22 +47,21 @@ import java.util.concurrent.*;
 public class SummaryAgent {
 
     // Tracks in-flight tool calls: inner correlationId → outer correlationId + sessionId + original text
-    static final ConcurrentHashMap<String, PendingAnalysis> pending = new ConcurrentHashMap<>();
+    final ConcurrentHashMap<String, PendingAnalysis> pending = new ConcurrentHashMap<>();
 
     record PendingAnalysis(String outerCorrelationId, String sessionId, String originalText) {}
 
-    static volatile OutputStream globalOut;
-
     public static void main(String[] args) throws Exception {
         Event.initLogging();
-        System.out.println("[SUMMARY-AGENT] Starting...");
-        BasePlugin.run("plugin.json", Event.DEFAULT_SOCKET, (json, out) -> {
-            if (globalOut == null) globalOut = out;
-            handle(json, out);
-        });
+        new SummaryAgent().start();
     }
 
-    static void handle(String json, OutputStream out) throws Exception {
+    void start() throws Exception {
+        System.out.println("[SUMMARY-AGENT] Starting...");
+        BasePlugin.run("plugin.json", Event.DEFAULT_SOCKET, this::handle);
+    }
+
+    void handle(String json, OutputStream out) throws Exception {
         Event event = Event.MAPPER.readValue(json, Event.class);
 
         switch (event.type()) {
@@ -74,7 +73,7 @@ public class SummaryAgent {
 
     // ── Step 1: receive analyze request → delegate to WordCountTool ──────────
 
-    static void handleAnalyzeRequest(Event event, OutputStream out) throws Exception {
+    void handleAnalyzeRequest(Event event, OutputStream out) throws Exception {
         JsonNode payload = Event.MAPPER.readTree(event.payload());
         String   text    = payload.path("text").asText("").trim();
 
@@ -111,7 +110,7 @@ public class SummaryAgent {
 
     // ── Step 2: receive tool result → build summary → reply to DemoRunner ────
 
-    static void handleToolResult(Event event, OutputStream out) throws Exception {
+    void handleToolResult(Event event, OutputStream out) throws Exception {
         String corrId = event.correlationId();
         PendingAnalysis ctx = pending.remove(corrId);
 
@@ -151,7 +150,7 @@ public class SummaryAgent {
         publishResult(ctx.outerCorrelationId(), ctx.sessionId(), summary, out);
     }
 
-    static void handleToolError(Event event, OutputStream out) throws Exception {
+    void handleToolError(Event event, OutputStream out) throws Exception {
         String corrId = event.correlationId();
         PendingAnalysis ctx = pending.remove(corrId);
         if (ctx == null) return;
@@ -165,7 +164,7 @@ public class SummaryAgent {
 
     // ── Helpers ───────────────────────────────────────────────────────────────
 
-    static void publishResult(String corrId, String sessionId, String summary, OutputStream out)
+    void publishResult(String corrId, String sessionId, String summary, OutputStream out)
             throws Exception {
         String payload = Event.MAPPER.writeValueAsString(
                 Map.of("result", summary));
@@ -176,7 +175,7 @@ public class SummaryAgent {
         System.out.println("[SUMMARY-AGENT] Result sent corrId=" + corrId);
     }
 
-    static String buildTopWordsSummary(JsonNode stats) {
+    String buildTopWordsSummary(JsonNode stats) {
         JsonNode topWords = stats.path("topWords");
         if (!topWords.isArray() || topWords.isEmpty()) return "";
         var sb = new StringBuilder("Top words: ");
