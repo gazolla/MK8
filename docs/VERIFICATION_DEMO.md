@@ -82,8 +82,8 @@ The table below maps the complete step-by-step transaction life cycle as events 
 | **2** | `Kernel` (Bus) | `message.summary-agent` | `text: "..."` | `SummaryAgent` | `corrId: "corr-demo-1"`, `sessId: "session-xyz"` |
 | **3** | `SummaryAgent` | `capability.invoke` | `name: "text.wordcount"`, `text: "..."` | `Kernel` (Bus) | `corrId: "corr-sub-word-1"`, `sessId: "session-xyz"` |
 | **4** | `Kernel` (Bus) | `capability.tool.text.wordcount` | `text: "..."` | `WordCountTool` | `corrId: "corr-sub-word-1"`, `sessId: "session-xyz"` |
-| **5** | `WordCountTool` | `capability.result` | `result: "{\"words\":10,...}"` | `Kernel` (Bus) | `corrId: "corr-sub-word-1"`, `sessId: "session-xyz"` |
-| **6** | `Kernel` (Bus) | `capability.result` | `result: "{\"words\":10,...}"` | `SummaryAgent` | `corrId: "corr-sub-word-1"`, `sessId: "session-xyz"` |
+| **5** | `WordCountTool` | `capability.result` | `result: "{\"words\":13,...}"` | `Kernel` (Bus) | `corrId: "corr-sub-word-1"`, `sessId: "session-xyz"` |
+| **6** | `Kernel` (Bus) | `capability.result` | `result: "{\"words\":13,...}"` | `SummaryAgent` | `corrId: "corr-sub-word-1"`, `sessId: "session-xyz"` |
 | **7** | `SummaryAgent` | `capability.result` | `result: "📄 Integrated Report..."` | `Kernel` (Bus) | `corrId: "corr-demo-1"`, `sessId: "session-xyz"` |
 | **8** | `Kernel` (Bus) | `capability.result` | `result: "📄 Integrated Report..."` | `DemoRunner` | `corrId: "corr-demo-1"`, `sessId: "session-xyz"` |
 

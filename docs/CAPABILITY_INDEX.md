@@ -18,9 +18,9 @@ The `CapabilityIndex` manages the following structural tasks:
 
 `CapabilityIndex` is designed to be fully thread-safe, supporting concurrent registrations and lookups from high-performance virtual thread tasks:
 
-* **`capabilities` Map:** Maps `capabilityName` to a list of active `CapabilityProvider` records.
-* **`activeAuctions` Map:** Tracks in-flight bidding auctions, mapping `correlationId` to the list of arrived `Bid` records.
-* **`auctionsLatch` Map:** Maps `correlationId` to a `CountDownLatch` representing the waiting state of the auction. The latch is released when all active providers have submitted their bids or when an auction timeout occurs.
+* **`registrations` Map:** Maps `capabilityName` to a `CopyOnWriteArrayList<Registration>` of live providers. A `Registration` holds `pluginId`, `triggerEvent` (null for agents), and `bidWeight`.
+* **`pendingInvokes` Map:** Maps `capabilityName` to a list of queued `capability.invoke` events waiting for an on-demand plugin to start and register.
+* **`auctions` Map:** Maps an `auctionId` (UUID) to an `AuctionContext` holding the original event, candidate list, and collected bids. Auction timeout is enforced by a `ScheduledExecutorService` (500ms window), not a latch.
 
 ---
 
@@ -43,8 +43,8 @@ The flow diagram below details how the `CapabilityIndex` coordinates a real-time
                                     to all potential candidate tools]
                                               │
                                               ▼
-                                   [Await CountDownLatch or
-                                    250ms Timeout Threshold]
+                                   [Await ScheduledExecutorService
+                                    500ms Timeout Window]
                                               │
                                               ├─► [Bid Received] ──► [Record Score]
                                               │
@@ -60,25 +60,39 @@ The flow diagram below details how the `CapabilityIndex` coordinates a real-time
 
 ## 4. Class API and Method Signatures
 
-### A. Registry Management
+### A. EventInterceptor Entry Point
 
-#### `public synchronized void register(String capabilityName, String pluginId, double bidWeight, String triggerEvent)`
-* **Description:** Indexes a new capability capability provider. Registers the provider ID, default score, and target trigger event.
-
-#### `public synchronized void deregisterPlugin(String pluginId)`
-* **Description:** Sweeps the index and removes all capabilities associated with the given plugin ID when it disconnects.
+#### `boolean intercept(Event event, String json) throws Exception`
+Routes to the appropriate handler based on `event.type()`. Returns `true` (consumed) for `capability.invoke`, `capability.unregister`, `capability.bid.response`, and `capability.query`. Returns `false` (side-effect only) for `capability.register`, `system.plugin.died/stopped`, and `plugin.installed`.
 
 ---
 
-### B. Routing and Auction Management
+### B. Registration Management
 
-#### `public RouteInfo resolveRoute(String capabilityName, KernelBus bus) throws Exception`
-* **Description:** Returns the optimal routing path (`RouteInfo`) for the capability. If multiple providers exist, it automatically initiates and coordinates a 250ms concurrent bidding auction over the event bus.
-* **Arguments:**
-  * `capabilityName`: Semantic name of the capability to resolve.
-  * `bus`: The active `KernelBus` reference used to publish bid requests.
+#### `void handleRegister(Event event)`
+* **Description:** Adds a new `Registration` to `registrations` for the declared capability. After registration, drains any `pendingInvokes` queued while the plugin was starting.
 
-#### `public void handleBidResponse(Event event)`
-* **Description:** Intercepts `capability.bid.response` events, extracts the score, registers the bid inside the `activeAuctions` list, and decrements the auction latch.
-* **Arguments:**
-  * `event`: The incoming JSON bid event.
+#### `void handleUnregister(Event event)`
+* **Description:** Removes the specific `Registration` for the given `pluginId` from the `registrations` map.
+
+#### `void handlePluginDied(Event event)`
+* **Description:** Sweeps `registrations` and removes all entries whose `pluginId` matches the dead plugin.
+
+---
+
+### C. Routing and Auction Management
+
+#### `void handleInvoke(Event event)`
+* **Description:** Routes a `capability.invoke` to a live provider. If no live provider is found, consults the `PluginCatalog`: persistent plugins are re-routed via `triggerEvent`; on-demand plugins are queued in `pendingInvokes` and a `plugin.load` event is emitted.
+
+#### `void startAuction(String capName, List<Registration> providers, Event invokeEvent)`
+* **Description:** Creates an `AuctionContext`, broadcasts `capability.bid.request` to all candidates, and schedules `resolveAuction()` after a **500ms** window.
+
+#### `void handleBidResponse(Event event)`
+* **Description:** Adds a `BidEntry` to the in-flight `AuctionContext`. If all candidates have voted, resolves the auction immediately (early exit).
+
+#### `void resolveAuction(String auctionId)`
+* **Description:** Selects the winner with the highest effective score (`score × (1 - load)`). Falls back to the first candidate if no bids arrived. Calls `routeToProvider()`.
+
+#### `String buildCapabilityList()`
+* **Description:** Returns a JSON array merging live registrations (`"live": true`) with catalog entries for capabilities not currently running (`"live": false`).

@@ -85,4 +85,4 @@ The sequence flowchart below illustrates how the interceptor handles incoming `c
 * **Description:** Manages cache hit evaluations and registers concurrent callers for Single-Flight collapsing.
 
 #### `private boolean handleResult(Event event, String json) throws Exception`
-* **Description:** Manages the arrival of computed results, caches the payloads, starts the 5-minute eviction scheduler, delivers the response to all registered callers, and cleans up from `Kernel.pendingRoutes` to prevent memory leaks.
+* **Description:** Manages the arrival of computed results, caches the payloads, starts the 5-minute eviction scheduler, delivers the response to all registered callers, and calls `bus.removePendingRoute(corrId)` to clean up the return-routing table and prevent memory leaks.

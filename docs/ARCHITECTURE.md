@@ -35,6 +35,7 @@ Interceptors hook directly into the event bus pipeline inside `Kernel.route()`.
 Provides a safe interface for interceptors to re-publish events into the bus or push frames directly to specific connections.
 - `void sendTo(String pluginId, String json)`: Delivers a payload directly to a client's write queue, bypassing routing.
 - `void route(Event event) throws Exception`: Serializes and pushes an event through the full Kernel routing pipeline.
+- `void removePendingRoute(String corrId)`: Removes a correlationId from the return-routing table. Used by `IdempotencyInterceptor` after it manually delivers a result, to prevent memory leaks in `pendingRoutes`.
 
 ---
 
@@ -81,24 +82,28 @@ Acts as the entry barrier for event deduplication and collapsing.
   - `intercept(Event event, String json)`: Directs `capability.invoke` to cache lookups or collapsing queues, and intercepts `capability.result` / `capability.error` to cache and manually distribute outputs.
 
 ### `CapabilityIndex.java`
-Maintains live capability provider state and manages leilões.
+Maintains live capability provider state and manages auctions.
 - **Key Fields**:
-  - `registrations`: Maps capability names to active providers.
-  - `pendingInvokes`: Queues invocations while on-demand providers are spawning.
+  - `registrations`: Maps capability names to active `Registration` records (live providers only).
+  - `pendingInvokes`: Queues `capability.invoke` events while on-demand providers are spawning.
+  - `auctions`: Tracks in-flight `AuctionContext` objects by auction UUID.
 - **Key Methods**:
   - `intercept(Event event, String json)`: Directs invoke queries, processes `capability.register` / `unregister` side-effects, and schedules auctions.
-  - `startAuction(String capName, List<Registration> providers, Event invokeEvent)`: Broadcasts `capability.bid.request` and schedules resolution after 500ms.
-  - `resolveAuction(String auctionId)`: Determines the winning provider and forwards the queued invocation.
+  - `handleInvoke(Event event)`: Routes to a live provider, falls back to catalog for persistent/on-demand plugins, or queues pending invokes.
+  - `startAuction(String capName, List<Registration> providers, Event invokeEvent)`: Broadcasts `capability.bid.request` and schedules resolution after **500ms**.
+  - `resolveAuction(String auctionId)`: Determines the winning provider (highest `score × (1 - load)`) and forwards the queued invocation.
 
 ### `ProcessManager.java`
 Coordinates child process spawning and monitoring.
 - **Key Fields**:
   - `managed`: Map of active `ManagedProcess` records tracking PID and execution handles.
-  - `lastUsed`: Tracks invocation timestamps for idle-kill checks.
+  - `lastUsed`: Tracks last `capability.invoke` timestamp per plugin for idle-kill checks.
+  - `spawning`: Set of plugin IDs currently being launched, preventing double-spawn on burst `plugin.load` events.
 - **Key Methods**:
-  - `intercept(Event event, String json)`: Intercepts `plugin.load` and `agent.spawn` lifecycle commands.
-  - `handlePluginLoad(Event event)`: Launches on-demand tools, redirects streams to `logs/{pluginId}.log`, and binds process-exit callbacks.
-  - `checkIdlePlugins()`: Invoked periodically to terminate on-demand tools exceeding their idle thresholds.
+  - `intercept(Event event, String json)`: Intercepts `plugin.load`, `agent.spawn`, `agent.stop`, `agent.idle`, `agent.busy`, `agent.ready`, and `capability.system.plugin.list`.
+  - `handlePluginLoad(Event event)`: Looks up the `CatalogEntry`, builds `ProcessBuilder` with `redirectOutput(Redirect.appendTo(logFile)).redirectErrorStream(true)`, and binds process-exit callbacks.
+  - `trackUsage(String capName)`: Called directly by `CapabilityIndex.handleInvoke()` to update `lastUsed` (bypasses interceptor chain, which stops at CapabilityIndex).
+  - `checkIdlePlugins()`: Invoked every 60 seconds to terminate on-demand plugins exceeding their `idleTimeoutSeconds`.
 
 ### `PluginCatalog.java`
 Walks and indexes static plugin capabilities on disk.

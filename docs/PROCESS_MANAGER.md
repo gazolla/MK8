@@ -60,41 +60,48 @@ The Process Manager utilizes a scheduler thread executor to periodically check f
 
 ## 3. Class API and Method Signatures
 
-### A. Process Spawning
+### A. EventInterceptor Entry Point
 
-#### `public synchronized boolean spawn(String pluginId, Event.PluginConfig config)`
-* **Description:** Spawns a child process plugin using `ProcessBuilder` and redirects standard outputs to logs.
-* **Arguments:**
-  * `pluginId`: Unique identifier of the target plugin.
-  * `config`: The launcher metadata and launch commands parsed from the manifest.
+#### `boolean intercept(Event event, String json) throws Exception`
+Routes to the appropriate handler. Returns `true` (consumed) for `plugin.load`, `agent.spawn`, `agent.stop`, and `capability.system.plugin.list`. Returns `false` (side-effect only) for `agent.ready`, `agent.idle`, and `agent.busy`.
 
 ---
 
-### B. Lifecycle and Sweeping Management
+### B. Process Spawning
 
-#### `public synchronized void registerMessage(String pluginId)`
-* **Description:** Resets the idle timer of the target plugin. Should be invoked every time the Kernel routes a message to the plugin.
+#### `void handlePluginLoad(Event event)`
+* **Description:** Triggered by `plugin.load` events emitted by `CapabilityIndex`. Looks up the `CatalogEntry` via `PluginCatalog`, builds a `ProcessBuilder` with `launch.command`, redirects output to `logs/{pluginId}.log`, and registers an `onExit()` callback that publishes `system.plugin.died`.
+* **Double-spawn guard:** Uses a `ConcurrentHashMap.newKeySet()` (`spawning`) to prevent multiple concurrent spawns of the same plugin on burst `plugin.load` events.
 
-#### `public synchronized void kill(String pluginId)`
-* **Description:** Gracefully terminates the child process and closes its active input/output streams.
-
-#### `public synchronized void shutdownAll()`
-* **Description:** Invoked when the Kernel shuts down. Gracefully terminates all active child processes, asserts their PID terminations, and cleans up system socket files.
+#### `void handleSpawn(Event event)`
+* **Description:** Triggered by `agent.spawn` events (AgentSpawner delegations). Reads `launch.command` from the agent's `plugin.json` directly (fresh from disk), starts the process with `inheritIO()`, and publishes `system.plugin.spawned`.
 
 ---
 
-## 4. Multi-Stream Log Redirection
+### C. Lifecycle Management
 
-To ensure that developers can inspect background plugins in real-time without cluttering the Kernel's main terminal output, `ProcessManager` forks stream redirection into dedicated asynchronous tasks. 
+#### `void trackUsage(String capName)`
+* **Description:** Updates `lastUsed` for the plugin providing `capName`. Called **directly** by `CapabilityIndex.handleInvoke()` before routing — bypasses the interceptor chain, which stops at `CapabilityIndex` (returns `true`).
 
-For every spawned subprocess, the manager starts background virtual threads to copy streams into `/logs/{pluginId}.log`:
+#### `void handleStop(Event event)`
+* **Description:** Removes the plugin from `managed`, cancels any pending idle timer, calls `process.destroy()` with a 5-second graceful timeout (`destroyForcibly()` if it does not exit), and publishes `system.plugin.stopped`.
+
+#### `void checkIdlePlugins()`
+* **Description:** Runs every 60 seconds via `ScheduledExecutorService`. For each entry in `managed`, checks `lastUsed` against the plugin's `idleTimeoutSeconds` from `PluginCatalog`. Publishes `agent.stop` for plugins that have exceeded their idle threshold. Only applies to `on-demand` lifecycle plugins.
+
+---
+
+## 4. Log Redirection
+
+To keep each plugin's output isolated without cluttering the Kernel's terminal, `ProcessManager` uses `ProcessBuilder`'s native stream redirection. Both `stdout` and `stderr` are merged and written to `logs/{pluginId}.log` via OS-level file descriptors — no virtual thread copying involved:
 
 ```java
-Process process = processBuilder.start();
-long pid = process.toHandle().pid();
-
-// Fork virtual threads to copy stdout and stderr asynchronously
-Thread.ofVirtual().start(() -> redirectStream(process.getInputStream(), stdoutLogFile));
-Thread.ofVirtual().start(() -> redirectStream(process.getErrorStream(), stderrLogFile));
+File logFile = new File(logsDir, pluginId + ".log");
+Process process = new ProcessBuilder(command)
+        .directory(pluginDir.toFile())
+        .redirectOutput(ProcessBuilder.Redirect.appendTo(logFile))
+        .redirectErrorStream(true)   // merges stderr into stdout
+        .start();
 ```
-This isolates each plugin's operational output, fulfilling the Twelve-Factor App logging principles.
+
+This approach is zero-copy, does not consume virtual threads for stream draining, and fulfills the Twelve-Factor App logging principles.
