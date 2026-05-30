@@ -52,7 +52,7 @@ public class Kernel {
     static final Connection KERNEL_SOURCE = new Connection("kernel", null);
 
     public static void main(String[] args) throws Exception {
-        Class.forName(Event.class.getName());
+        Event.initLogging();
         System.out.println("[KERNEL] Starting MK7...");
 
         Files.createDirectories(SOCKET_PATH.getParent());
@@ -250,7 +250,10 @@ public class Kernel {
                         + (int) prefixRoutes.stream().filter(pr -> type.startsWith(pr.prefix())).count();
                 System.out.println("[KERNEL] broadcast " + type + " from=" + source.pluginId + " → " + count + " subscriber(s)");
             }
-        } else if (!type.startsWith("plugin.")) {
+        } else if (!type.startsWith("plugin.")
+                && !"capability.register".equals(type)) {
+            // capability.register is handled in-process by CapabilityIndex (side-effect, no UDS subscribers
+            // after CapabilityRegistry was removed). All other events without subscribers are worth logging.
             System.out.println("[KERNEL] No subscribers for: " + type);
         }
     }
@@ -354,12 +357,15 @@ interface EventInterceptor {
 /**
  * KernelBus — minimal surface for interceptors to emit events back into the kernel.
  *
- * sendTo: enqueues JSON directly to a plugin connection (bypasses routing).
- * route:  sends an event through the full Kernel pipeline (pendingRoutes + interceptors + broadcast).
+ * sendTo:             enqueues JSON directly to a plugin connection (bypasses routing).
+ * route:              sends an event through the full Kernel pipeline (pendingRoutes + interceptors + broadcast).
+ * removePendingRoute: removes a correlationId from the return-routing table (used by IdempotencyInterceptor
+ *                     after it manually delivers a result, to prevent memory leaks).
  */
 interface KernelBus {
     void sendTo(String pluginId, String json);
     void route(Event event) throws Exception;
+    void removePendingRoute(String corrId);
 }
 
 /** Concrete KernelBus backed by the Kernel's static routing tables. */
@@ -377,5 +383,10 @@ class KernelBusImpl implements KernelBus {
         // KERNEL_SOURCE is used so pendingRoutes can record "kernel" as the sender.
         String json = Event.MAPPER.writeValueAsString(event);
         Kernel.route(event, json, Kernel.KERNEL_SOURCE);
+    }
+
+    @Override
+    public void removePendingRoute(String corrId) {
+        Kernel.pendingRoutes.remove(corrId);
     }
 }

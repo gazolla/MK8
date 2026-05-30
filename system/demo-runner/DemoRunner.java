@@ -63,7 +63,7 @@ public class DemoRunner {
     private static final java.util.concurrent.atomic.AtomicBoolean testStarted = new java.util.concurrent.atomic.AtomicBoolean(false);
 
     public static void main(String[] args) throws Exception {
-        Class.forName(Event.class.getName());
+        Event.initLogging();
         System.out.println("╔══════════════════════════════════════════════════════╗");
         System.out.println("║    MK8 Kernel-Extendido — Idempotency & Collapsing    ║");
         System.out.println("║  3 plugins: DemoRunner → SummaryAgent → WordCount    ║");

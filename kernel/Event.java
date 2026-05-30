@@ -52,6 +52,18 @@ public record Event(
     public static final ThreadLocal<String> CURRENT_SPAN_ID = new ThreadLocal<>();
 
     static {
+        initLogging();
+    }
+
+    /**
+     * Installs the timestamp-prefixing PrintStream on stdout/stderr.
+     * Safe to call multiple times — guarded by a system property flag.
+     *
+     * Plugins should call this explicitly at the top of main() instead of relying
+     * on the static initializer ordering (which varies by JVM class-loading sequence):
+     *   {@code Event.initLogging();}
+     */
+    public static void initLogging() {
         if (System.getProperty("mk8.logging.redirected") == null) {
             System.setProperty("mk8.logging.redirected", "true");
             System.setOut(new TimestampPrintStream(System.out));

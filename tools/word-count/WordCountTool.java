@@ -26,7 +26,7 @@ import java.util.stream.Collectors;
 public class WordCountTool {
 
     public static void main(String[] args) throws Exception {
-        Class.forName(Event.class.getName());
+        Event.initLogging();
         System.out.println("[WORD-COUNT] Starting (on-demand)...");
         BasePlugin.run("plugin.json", Event.DEFAULT_SOCKET, WordCountTool::handle);
     }

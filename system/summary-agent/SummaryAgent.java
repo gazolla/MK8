@@ -54,7 +54,7 @@ public class SummaryAgent {
     static volatile OutputStream globalOut;
 
     public static void main(String[] args) throws Exception {
-        Class.forName(Event.class.getName());
+        Event.initLogging();
         System.out.println("[SUMMARY-AGENT] Starting...");
         BasePlugin.run("plugin.json", Event.DEFAULT_SOCKET, (json, out) -> {
             if (globalOut == null) globalOut = out;

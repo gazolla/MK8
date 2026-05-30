@@ -36,12 +36,12 @@ public class Start {
             // Ensure logs directory exists at project root
             Files.createDirectories(Path.of("logs"));
 
-            // 1. Start the Kernel
+            // 1. Start the Kernel (logs/kernel.log is truncated on each run)
             System.out.println("[BOOT] Starting Kernel.java in the background...");
             Process kernel = new ProcessBuilder("jbang", "Kernel.java")
                     .directory(new File("kernel"))
                     .redirectOutput(ProcessBuilder.Redirect.to(new File("logs/kernel.log")))
-                    .redirectError(ProcessBuilder.Redirect.to(new File("logs/kernel.log")))
+                    .redirectErrorStream(true)
                     .start();
             backgroundProcesses.add(kernel);
 
@@ -57,12 +57,12 @@ public class Start {
             }
             System.out.println(" Connected! (Socket verified)\n");
 
-            // 3. Start the Summary Agent
+            // 3. Start the Summary Agent (logs/summary-agent.log is truncated on each run)
             System.out.println("[BOOT] Starting SummaryAgent.java in the background...");
             Process summaryAgent = new ProcessBuilder("jbang", "SummaryAgent.java")
                     .directory(new File("system/summary-agent"))
                     .redirectOutput(ProcessBuilder.Redirect.to(new File("logs/summary-agent.log")))
-                    .redirectError(ProcessBuilder.Redirect.to(new File("logs/summary-agent.log")))
+                    .redirectErrorStream(true)
                     .start();
             backgroundProcesses.add(summaryAgent);
 

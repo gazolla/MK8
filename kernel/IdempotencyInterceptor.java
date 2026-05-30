@@ -113,8 +113,9 @@ class IdempotencyInterceptor implements EventInterceptor {
             bus.sendTo(callerId, json);
         }
 
-        // Clean up from Kernel's pendingRoutes to prevent memory leak
-        Kernel.pendingRoutes.remove(corrId);
+        // Clean up the return-routing table to prevent memory leak.
+        // Uses KernelBus to avoid direct coupling to Kernel's static fields.
+        bus.removePendingRoute(corrId);
 
         return true; // consume the result (handled manually)
     }
