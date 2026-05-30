@@ -27,25 +27,9 @@ import java.util.stream.Stream;
  */
 class PluginManager implements PluginRuntime {
 
-    // ── Catalog entry ─────────────────────────────────────────────────────────
-
-    /**
-     * One entry per capability declaration (a plugin with N capabilities → N entries).
-     * launchCommand is the full array from launch.command, not just the first element.
-     */
-    record CatalogEntry(
-            String   pluginId,
-            String   pluginDir,          // absolute path of the plugin directory
-            String   capabilityName,
-            String   triggerEvent,       // null for agents (no triggerEvent field)
-            boolean  onDemand,           // lifecycle.mode == "on-demand"
-            boolean  persistent,         // lifecycle.mode == "persistent"
-            double   bidWeight,
-            int      idleTimeoutSeconds,
-            String[] launchCommand       // full launch.command array (e.g. ["jbang", "Tool.java"])
-    ) {}
-
     // ── Managed process ───────────────────────────────────────────────────────
+    // CatalogEntry is defined in Kernel.java (top-level record) so CapabilityIndex
+    // can reference it without importing PluginManager.
 
     record ManagedProcess(String pluginId, long pid, Path pluginDir, Process process) {}
 

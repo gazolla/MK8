@@ -329,6 +329,23 @@ class Connection {
 
 record PrefixRoute(String prefix, Connection conn) {}
 
+/**
+ * CatalogEntry — one entry per capability declaration found in plugin.json.
+ * Defined here (not inside PluginManager) so CapabilityIndex can reference it
+ * without coupling to PluginManager at all.
+ */
+record CatalogEntry(
+        String   pluginId,
+        String   pluginDir,
+        String   capabilityName,
+        String   triggerEvent,       // null for agents (no triggerEvent field)
+        boolean  onDemand,           // lifecycle.mode == "on-demand"
+        boolean  persistent,         // lifecycle.mode == "persistent"
+        double   bidWeight,
+        int      idleTimeoutSeconds,
+        String[] launchCommand       // full launch.command array (e.g. ["jbang", "Tool.java"])
+) {}
+
 // ── Option B interfaces and implementations ───────────────────────────────────
 
 /**
@@ -369,8 +386,8 @@ interface KernelBus {
 interface PluginRuntime {
     // Catalog
     void awaitReady(long timeoutMs);
-    PluginManager.CatalogEntry getByCapName(String capName);
-    Collection<PluginManager.CatalogEntry> allEntries();
+    CatalogEntry getByCapName(String capName);
+    Collection<CatalogEntry> allEntries();
     void refresh();
     // Lifecycle
     void spawnOnDemand(String capabilityName) throws Exception;

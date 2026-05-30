@@ -1,42 +1,52 @@
 ///usr/bin/env jbang "$0" "$@" ; exit $?
 //JAVA 21+
 
-import java.io.File;
-import java.nio.file.Files;
-import java.nio.file.Path;
-import java.util.ArrayList;
-import java.util.List;
+import java.io.*;
+import java.nio.file.*;
+import java.util.*;
 import java.util.concurrent.TimeUnit;
 
 /**
  * Start — single-entry bootrunner for the MK8 verification demo.
  *
- * Spawns the Kernel and SummaryAgent in the background, waits for the socket
- * to bind, executes the interactive DemoRunner in the foreground, and safely
- * tears down all child processes upon completion or interruption.
+ * Spawns Kernel and SummaryAgent in the background, waits for the UDS socket,
+ * runs DemoRunner in the foreground, and tears down all child processes on exit.
+ *
+ * Logging strategy:
+ *   logs/kernel.log        — Kernel stdout/stderr (truncated on each run)
+ *   logs/summary-agent.log — SummaryAgent stdout/stderr (truncated on each run)
+ *   logs/word-count.log    — WordCountTool stdout/stderr (appended by PluginManager)
+ *   logs/start.log         — Everything printed by Start itself + DemoRunner output
+ *                            (truncated on each run; mirrors the terminal exactly)
  */
 public class Start {
 
-    private static final Path SOCKET_PATH = Path.of("/tmp/mk7/kernel.sock");
+    private static final Path   SOCKET_PATH = Path.of("/tmp/mk7/kernel.sock");
+    private static final File   START_LOG   = new File("logs/start.log");
     private static final List<Process> backgroundProcesses = new ArrayList<>();
 
-    public static void main(String[] args) {
-        System.out.println("=======================================================");
-        System.out.println("          MK8 MicroKernel — Boot Runner                ");
-        System.out.println("=======================================================");
-        System.out.println();
+    public static void main(String[] args) throws Exception {
+        Files.createDirectories(Path.of("logs"));
 
-        // Ensure background processes are cleaned up on shutdown
+        // Tee System.out/err → terminal AND logs/start.log (truncated on each run).
+        // Every subsequent println — including DemoRunner output streamed below —
+        // lands in both places automatically.
+        var original  = System.out;
+        var logStream = new FileOutputStream(START_LOG, false); // false = truncate
+        System.setOut(new PrintStream(new TeeOutputStream(original,  logStream), true));
+        System.setErr(new PrintStream(new TeeOutputStream(System.err, logStream), true));
+
         Runtime.getRuntime().addShutdownHook(new Thread(Start::cleanup));
 
         try {
-            // Delete any existing socket file from previous dirty runs
             Files.deleteIfExists(SOCKET_PATH);
 
-            // Ensure logs directory exists at project root
-            Files.createDirectories(Path.of("logs"));
+            System.out.println("=======================================================");
+            System.out.println("          MK8 MicroKernel — Boot Runner                ");
+            System.out.println("=======================================================");
+            System.out.println();
 
-            // 1. Start the Kernel (logs/kernel.log is truncated on each run)
+            // 1. Kernel — output → logs/kernel.log
             System.out.println("[BOOT] Starting Kernel.java in the background...");
             Process kernel = new ProcessBuilder("jbang", "Kernel.java")
                     .directory(new File("kernel"))
@@ -45,19 +55,18 @@ public class Start {
                     .start();
             backgroundProcesses.add(kernel);
 
-            // 2. Poll socket availability (timeout 5 seconds)
+            // 2. Wait for UDS socket (timeout 5 s)
             System.out.print("[BOOT] Waiting for Kernel UDS socket to bind...");
             long start = System.currentTimeMillis();
             while (!Files.exists(SOCKET_PATH)) {
-                if (System.currentTimeMillis() - start > 5000) {
-                    throw new RuntimeException("Kernel socket failed to bind within 5 seconds. Check logs/kernel.log");
-                }
+                if (System.currentTimeMillis() - start > 5_000)
+                    throw new RuntimeException("Kernel socket not bound within 5 s — check logs/kernel.log");
                 System.out.print(".");
                 Thread.sleep(250);
             }
             System.out.println(" Connected! (Socket verified)\n");
 
-            // 3. Start the Summary Agent (logs/summary-agent.log is truncated on each run)
+            // 3. SummaryAgent — output → logs/summary-agent.log
             System.out.println("[BOOT] Starting SummaryAgent.java in the background...");
             Process summaryAgent = new ProcessBuilder("jbang", "SummaryAgent.java")
                     .directory(new File("system/summary-agent"))
@@ -65,18 +74,19 @@ public class Start {
                     .redirectErrorStream(true)
                     .start();
             backgroundProcesses.add(summaryAgent);
-
-            // Give the persistent agent a brief moment to connect and register
             Thread.sleep(1000);
 
-            // 4. Execute the DemoRunner in the foreground (inherits standard input/output streams)
+            // 4. DemoRunner — stream output line-by-line through System.out so the
+            //    TeeOutputStream captures it in start.log alongside the [BOOT] messages.
             System.out.println("[BOOT] Executing DemoRunner.java in the foreground...\n");
             Process demoRunner = new ProcessBuilder("jbang", "DemoRunner.java")
                     .directory(new File("system/demo-runner"))
-                    .inheritIO()
+                    .redirectErrorStream(true)
                     .start();
 
-            // Wait for the DemoRunner to complete execution
+            try (var reader = new BufferedReader(new InputStreamReader(demoRunner.getInputStream()))) {
+                reader.lines().forEach(System.out::println);
+            }
             int exitCode = demoRunner.waitFor();
             System.out.println("\n[BOOT] DemoRunner finished with exit code: " + exitCode);
 
@@ -99,20 +109,44 @@ public class Start {
                 try {
                     long pid = p.pid();
                     p.destroy();
-                    if (!p.waitFor(3, TimeUnit.SECONDS)) {
-                        p.destroyForcibly();
-                    }
+                    if (!p.waitFor(3, TimeUnit.SECONDS)) p.destroyForcibly();
                     System.out.println("[BOOT] Terminated background process PID=" + pid);
                 } catch (Exception ignored) {}
             }
         }
         backgroundProcesses.clear();
-        
+
         try {
             Files.deleteIfExists(SOCKET_PATH);
             System.out.println("[BOOT] Cleaned up socket file.");
         } catch (Exception ignored) {}
-        
+
         System.out.println("[BOOT] Shutdown complete.");
+    }
+
+    /**
+     * Writes every byte to two output streams simultaneously.
+     * Used to mirror System.out to both the terminal and logs/start.log.
+     */
+    private static final class TeeOutputStream extends OutputStream {
+        private final OutputStream a, b;
+
+        TeeOutputStream(OutputStream a, OutputStream b) {
+            this.a = a;
+            this.b = b;
+        }
+
+        @Override public void write(int x) throws IOException {
+            a.write(x); b.write(x);
+        }
+
+        @Override public void write(byte[] buf, int off, int len) throws IOException {
+            a.write(buf, off, len); b.write(buf, off, len);
+        }
+
+        @Override public void flush() throws IOException {
+            a.flush(); b.flush();
+        }
+        // Intentionally not closing a or b — System.out must stay open.
     }
 }

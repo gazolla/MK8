@@ -2,44 +2,38 @@
 
 A modular, asynchronous, and event-driven MicroKernel system implemented in Java 21+. It enables independent processes (plugins) to discover and call each other's capabilities over Unix Domain Sockets (UDS) using JSON event frames, eliminating compile-time or static network dependencies.
 
-For a conceptual deep dive into the system's core design patterns—such as capability bidding auctions, idempotency caching, Single-Flight request collapsing, lifecycles, and distributed tracing—consult the **[System Concepts Guide](docs/CONCEPTS.md)**. To explore the concrete code layout, package structure, class descriptions, and core API interfaces (such as `EventInterceptor` and `KernelBus`), review the **[System Architecture Reference](docs/ARCHITECTURE.md)**.
+For a conceptual deep dive into the system's core design patterns — such as capability bidding auctions, idempotency caching, Single-Flight request collapsing, lifecycles, and distributed tracing — consult the **[System Concepts Guide](docs/CONCEPTS.md)**. To explore the concrete code layout, class descriptions, and core API interfaces (`EventInterceptor`, `KernelBus`, `PluginRuntime`), review the **[System Architecture Reference](docs/ARCHITECTURE.md)**.
 
 ---
 
-## 1. Project Structuring
-
-Below is the layout of folders and files in the repository. Click the links to explore the source files and their respective documentation guides:
+## 1. Project Structure
 
 * 📁 **MK8 (Project Root)**
-  * 📄 **[Start.java](Start.java)** — Automated foreground/background bootrunner and process cleanup utility.
-  * 📄 **[README.md](README.md)** — Main entry point (Setup, Quick Start, and conceptual mappings).
-  * 📁 **`logs/`** — Automatically spawned directory containing stdout/stderr redirects of all plugin processes.
+  * 📄 **[Start.java](Start.java)** — Bootrunner: spawns Kernel and SummaryAgent in the background, streams DemoRunner in the foreground, auto-generates `logs/start.log` via `TeeOutputStream`, and tears down all processes on exit.
+  * 📄 **[README.md](README.md)** — Main entry point (Setup, Quick Start, and documentation index).
+  * 📁 **`logs/`** — Auto-created on first run. Contains `start.log` (full run transcript), `kernel.log`, `summary-agent.log`, and `word-count.log`.
   * 📁 **`kernel/`** *(MicroKernel Core Infrastructure)*
-    * 📄 **[Kernel.java](kernel/Kernel.java)** — UDS socket server, virtual threads router, and interceptor loop. *(See **[Core Kernel Guide](docs/KERNEL.md)**)*
-    * 📄 **[Event.java](kernel/Event.java)** — JSON event schema, Jackson parsing models, and UDS frame reader. *(See **[Event Taxonomy Reference](docs/EVENTS.md)**)*
-    * 📄 **[BasePlugin.java](kernel/BasePlugin.java)** — Shared bootstrap connection and lifecycle boilerplate for plugins. *(See **[BasePlugin Guide](docs/BASE_PLUGIN.md)**)*
-    * 📄 **[PluginCatalog.java](kernel/PluginCatalog.java)** — Local directory scanner that reads metadata manifests. *(See **[PluginCatalog Guide](docs/PLUGIN_CATALOG.md)**)*
-    * 📄 **[CapabilityIndex.java](kernel/CapabilityIndex.java)** — Dynamic capability provider auction and route indexing rules. *(See **[CapabilityIndex Guide](docs/CAPABILITY_INDEX.md)**)*
-    * 📄 **[ProcessManager.java](kernel/ProcessManager.java)** — On-demand subprocess spawner and idle-time process cleaner. *(See **[ProcessManager Guide](docs/PROCESS_MANAGER.md)**)*
-    * 📄 **[IdempotencyInterceptor.java](kernel/IdempotencyInterceptor.java)** — Request collapsing tracking and sliding-window caching interceptor. *(See **[Idempotency & Collapsing Guide](docs/IDEMPOTENCY.md)**)*
-  * 📁 **`system/`** *(Persistent Orchestrators and Agents)*
-    * 📁 **`demo-runner/`** — Verification client orchestrator and performance stats validator. *(See **[Pipeline Verification Demo Guide](docs/VERIFICATION_DEMO.md)**)*
-    * 📁 **`summary-agent/`** — Persistent agent that aggregates statistical metrics into structured reports.
-  * 📁 **`tools/`** *(Utility Tools and Workers)*
-    * 📁 **`word-count/`** — On-demand computational worker that parses and counts text metrics. *(See **[Plugin Creation & Integration Guide](docs/CREATE_PLUGIN.md)**)*
+    * 📄 **[Kernel.java](kernel/Kernel.java)** — UDS server, routing tables, interceptor chain wiring, and top-level records (`CatalogEntry`, `PrefixRoute`, `Connection`). Also defines the `EventInterceptor`, `KernelBus`, and `PluginRuntime` interfaces. *(See **[Core Kernel Architecture](docs/KERNEL.md)**)*
+    * 📄 **[Event.java](kernel/Event.java)** — JSON event envelope, 4-byte length-prefixed frame protocol, and Jackson factory methods. *(See **[Event Taxonomy Reference](docs/EVENTS.md)**)*
+    * 📄 **[BasePlugin.java](kernel/BasePlugin.java)** — Plugin bootstrap: UDS connect, `plugin.register` handshake, virtual-thread dispatcher, and auto-bidding. *(See **[BasePlugin Reference](docs/BASE_PLUGIN.md)**)*
+    * 📄 **[PluginManager.java](kernel/PluginManager.java)** — Single source of truth for plugins: directory scan, catalog indexing, on-demand process spawn, idle-kill sweep. Implements `PluginRuntime`. *(See **[PluginManager Guide](docs/PLUGIN_MANAGER.md)**)*
+    * 📄 **[CapabilityIndex.java](kernel/CapabilityIndex.java)** — Live capability registry, bidding auction engine, built-in capability dispatcher. Depends only on `PluginRuntime` — zero reference to `PluginManager`. *(See **[CapabilityIndex Guide](docs/CAPABILITY_INDEX.md)**)*
+    * 📄 **[IdempotencyInterceptor.java](kernel/IdempotencyInterceptor.java)** — Single-Flight request collapsing and sliding-window result cache. *(See **[Idempotency & Collapsing Guide](docs/IDEMPOTENCY.md)**)*
+  * 📁 **`system/`** *(Persistent Orchestrators)*
+    * 📁 **`demo-runner/`** — Verification client: fires concurrent and sequential requests, validates collapsing and cache hits. *(See **[Pipeline Verification Demo](docs/VERIFICATION_DEMO.md)**)*
+    * 📁 **`summary-agent/`** — Persistent orchestrator that delegates to WordCountTool and returns formatted analysis reports.
+  * 📁 **`tools/`** *(On-Demand Workers)*
+    * 📁 **`word-count/`** — On-demand tool: word, sentence, and unique-word counting. *(See **[Creating a Plugin from Scratch](docs/CREATE_PLUGIN.md)**)*
+
 ---
 
-## 2. Quick Start: Run the Pipeline in 6 Seconds (Recommended)
-
-You can run the entire pipeline, execute the verification tests, inspect the results, and automatically clean up background processes using JBang and a single command.
+## 2. Quick Start: Run the Pipeline in One Command
 
 ### Prerequisites
-* **Java Development Kit (JDK) 21** or higher.
-* **JBang** installed and configured in your system terminal PATH.
+* **JDK 21+**
+* **JBang** on your PATH
 
 ### Run Command
-Execute the unified bootrunner from the project root directory:
-
 ```bash
 jbang Start.java
 ```
@@ -51,7 +45,7 @@ jbang Start.java
 =======================================================
 
 [BOOT] Starting Kernel.java in the background...
-[BOOT] Waiting for Kernel UDS socket to bind....... Connected! (Socket verified)
+[BOOT] Waiting for Kernel UDS socket to bind..... Connected! (Socket verified)
 
 [BOOT] Starting SummaryAgent.java in the background...
 [BOOT] Executing DemoRunner.java in the foreground...
@@ -61,15 +55,13 @@ jbang Start.java
 ║  3 plugins: DemoRunner → SummaryAgent → WordCount    ║
 ╚══════════════════════════════════════════════════════╝
 
-[EVENT] Loading config: plugin.json
-[DEMO-RUNNER] Connected to kernel.
 [DEMO] === STARTING IDEMPOTENCY & COLLAPSING TEST ===
 
 [DEMO] → Sent concurrent request #1 corrId=haiku-collapsed-id
 [DEMO] → Sent concurrent request #2 (duplicate) corrId=haiku-collapsed-id
 [DEMO] Both requests in-flight. Waiting for collapsing...
 
-[DEMO] 🟢 Plugin spawned: word-count pid=23284
+[DEMO] 🟢 Plugin spawned: word-count pid=32221
 ┌─ Result received (latch=3) corrId=haiku-collapsed-id ──
 │ 📄 Text Analysis Report
 │ ─────────────────────────────
@@ -94,7 +86,7 @@ jbang Start.java
 
 [DEMO] === RUNNING SEQUENTIAL CACHE HIT TEST ===
 [DEMO] Sending duplicate request #3 sequentially (corrId=haiku-collapsed-id)...
-[DEMO] → Sent sequential request #3 in 1ms
+[DEMO] → Sent sequential request #3 in 0ms
 ┌─ Result received (latch=1) corrId=haiku-collapsed-id ──
 │ 📄 Text Analysis Report
 │ ─────────────────────────────
@@ -139,8 +131,8 @@ jbang Start.java
 [BOOT] DemoRunner finished with exit code: 0
 
 [BOOT] Cleaning up background processes...
-[BOOT] Terminated background process PID=23251
-[BOOT] Terminated background process PID=23261
+[BOOT] Terminated background process PID=32186
+[BOOT] Terminated background process PID=32197
 [BOOT] Cleaned up socket file.
 [BOOT] Shutdown complete.
 ```
@@ -155,7 +147,7 @@ For a detailed explanation of the text analysis example (word, sentence, and voc
 
 ## 4. Manual Sequential Execution (For Process Inspection)
 
-If you prefer to inspect individual process streams and logs in real-time, execute the components sequentially in three separate terminal windows:
+If you prefer to inspect individual process streams and logs in real time, execute the components sequentially in three separate terminal windows:
 
 ### Step 1: Start the Core Kernel UDS Server
 ```bash
@@ -179,17 +171,14 @@ jbang DemoRunner.java
 
 ## 5. Documentation Index
 
-Detailed architectural specs and developer guidelines are available in the `docs` folder:
-
-* **[Core Kernel Architecture](docs/KERNEL.md):** Architectural spec of UDS channel communications, length-prefixed binary socket framing, blocking queue buffers, and virtual thread pools.
-* **[System Concepts](docs/CONCEPTS.md):** Theoretical breakdowns of distributed tracing correlation, bidding auctions, idempotency caches, request collapsing, and persistent/on-demand lifecycles.
-* **[System Architecture & Class Reference](docs/ARCHITECTURE.md):** Concrete references detailing classes, method signatures, package designs, and implementation interfaces.
-* **[BasePlugin Reference Guide](docs/BASE_PLUGIN.md):** Developer guide for the reusable plugin connection loops, automatic registries, and virtual thread execution helpers.
-* **[CapabilityIndex Guide](docs/CAPABILITY_INDEX.md):** Code guide for dynamic bidding auctions, provider scoring weight tables, and active capability mappings.
-* **[ProcessManager Guide](docs/PROCESS_MANAGER.md):** Technical reference for JBang subprocess spawning, Eleven-Factor stream logs logging, and idle timeout sweeping.
-* **[Idempotency & Collapsing Guide](docs/IDEMPOTENCY.md):** Implementation details for Single-Flight request collapsing maps, caching eviction schedulers, and memory leak cleanups.
-* **[Pipeline Verification Demo Guide](docs/VERIFICATION_DEMO.md):** Concrete blueprint mapping the verification example (text analysis), including events mapping per class, pub/sub chain tables, and sequence flowcharts.
-* **[Creating a Plugin from Scratch](docs/CREATE_PLUGIN.md):** Step-by-step developer guide showing how to implement, package, and integrate a new plugin (illustrated via `SentimentAnalysisTool`).
-* **[Plugin Configuration Schemas](docs/PLUGIN_SCHEMAS.md):** Structural guide defining all `plugin.json` schema parameters, system/tool declarations, and boot-ordering tiers.
-* **[PluginCatalog Guide](docs/PLUGIN_CATALOG.md):** Developer guide for the local directory scanner, folder walking, metadata manifest parsing, indexing collections, and dynamic reload routines.
-* **[Event Taxonomy Reference](docs/EVENTS.md):** Complete event library catalog detailing namespaces, payloads, and transaction propagation requirements.
+* **[Core Kernel Architecture](docs/KERNEL.md):** UDS channel communications, length-prefixed binary framing, virtual-thread topology, and the interceptor chain pipeline.
+* **[System Concepts](docs/CONCEPTS.md):** Capability auctions, idempotency caching, Single-Flight request collapsing, persistent/on-demand lifecycles, and distributed tracing.
+* **[System Architecture & Class Reference](docs/ARCHITECTURE.md):** Class layout, interface specs (`EventInterceptor`, `KernelBus`, `PluginRuntime`), and method signatures.
+* **[Event Taxonomy Reference](docs/EVENTS.md):** Complete event catalog: `capability.*`, `system.plugin.*`, `message.*`, built-in capability names.
+* **[PluginManager Guide](docs/PLUGIN_MANAGER.md):** Catalog scan, `CatalogEntry` record, on-demand process spawn, idle-kill sweep, and the `PluginRuntime` interface.
+* **[CapabilityIndex Guide](docs/CAPABILITY_INDEX.md):** Live registry, bidding auction engine, `handleInvoke` flow, and built-in handler dispatch map.
+* **[Idempotency & Collapsing Guide](docs/IDEMPOTENCY.md):** Single-Flight collapsing implementation, sliding-window result cache, and memory-leak guards.
+* **[BasePlugin Reference](docs/BASE_PLUGIN.md):** Plugin bootstrap, `run()`, `publish()`, auto-bidding (`handleBidAuto`), and virtual-thread dispatch lifecycle.
+* **[Pipeline Verification Demo Guide](docs/VERIFICATION_DEMO.md):** Component roles, publisher/consumer event chain table, and sequence flowchart for the text analysis pipeline.
+* **[Creating a Plugin from Scratch](docs/CREATE_PLUGIN.md):** Step-by-step guide: `plugin.json`, instance pattern (`new Plugin().start()`), triggerEvent wiring, and pipeline integration.
+* **[Plugin Configuration Schemas](docs/PLUGIN_SCHEMAS.md):** Full `plugin.json` field reference for `system`, `tool`, and `agent` types; launch block; boot-order tiers.
