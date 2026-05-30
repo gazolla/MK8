@@ -1,0 +1,14 @@
+# Logs and temporary execution redirects
+logs/
+
+# Specifications folder
+specs/
+
+# JBang build cache and tooling directories
+.jbang/
+target/
+.idea/
+.vscode/
+*.class
+*.jar
+.DS_Store

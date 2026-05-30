@@ -1,0 +1,26 @@
+{
+  "id": "word-count",
+  "type": "tool",
+  "version": "1.0.0",
+  "description": "Counts words, sentences and unique words in a text.",
+  "lifecycle": {
+    "mode": "on-demand",
+    "idleTimeoutSeconds": 60
+  },
+  "launch": {
+    "name": "WordCount",
+    "command": ["jbang", "WordCountTool.java"],
+    "order": 20
+  },
+  "capabilities": [
+    {
+      "name": "text.wordcount",
+      "description": "Counts words in the given text.",
+      "triggerEvent": "capability.tool.text.wordcount",
+      "bidWeight": 1.0
+    }
+  ],
+  "subscribes": [
+    "capability.tool.text.wordcount"
+  ]
+}

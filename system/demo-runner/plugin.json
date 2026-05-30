@@ -1,0 +1,22 @@
+{
+  "id": "demo-runner",
+  "type": "system",
+  "version": "1.0.0",
+  "description": "Demo orchestrator: sends 3 text analysis requests and displays results.",
+  "lifecycle": {
+    "mode": "persistent"
+  },
+  "launch": {
+    "name": "DemoRunner",
+    "command": ["jbang", "DemoRunner.java"],
+    "order": 40,
+    "interactive": true
+  },
+  "capabilities": [],
+  "subscribes": [
+    "plugin.ready",
+    "capability.result",
+    "capability.error",
+    "system.plugin.spawned"
+  ]
+}

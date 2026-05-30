@@ -1,0 +1,25 @@
+{
+  "id": "summary-agent",
+  "type": "agent",
+  "version": "1.0.0",
+  "description": "Receives a text analysis request, delegates word counting to WordCountTool, and returns a human-friendly summary.",
+  "lifecycle": {
+    "mode": "persistent"
+  },
+  "launch": {
+    "name": "SummaryAgent",
+    "command": ["jbang", "SummaryAgent.java"],
+    "order": 30
+  },
+  "capabilities": [
+    {
+      "name": "text.analyze",
+      "description": "Analyzes a text and returns a summary report. Delegates word counting to text.wordcount.",
+      "bidWeight": 1.0
+    }
+  ],
+  "subscribes": [
+    "capability.result",
+    "capability.error"
+  ]
+}
