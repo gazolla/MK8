@@ -3,9 +3,8 @@
 //DEPS com.fasterxml.jackson.core:jackson-databind:2.17.2
 //DEPS com.fasterxml.jackson.datatype:jackson-datatype-jsr310:2.17.2
 //SOURCES Event.java
-//SOURCES PluginCatalog.java
+//SOURCES PluginManager.java
 //SOURCES CapabilityIndex.java
-//SOURCES ProcessManager.java
 //SOURCES IdempotencyInterceptor.java
 
 import java.io.IOException;
@@ -18,7 +17,7 @@ import java.nio.channels.ServerSocketChannel;
 import java.nio.channels.SocketChannel;
 import java.nio.file.Files;
 import java.nio.file.Path;
-import java.util.List;
+import java.util.*;
 import java.util.concurrent.*;
 
 /**
@@ -76,19 +75,18 @@ public class Kernel {
                 System.out.println("[KERNEL] Shut down.");
             }));
 
-            // ── Option B boot — wire CapabilityIndex + ProcessManager ──────────
+            // ── Option B boot — wire PluginManager + CapabilityIndex ──────────
             Path mk8Root = findProjectRoot();
             System.out.println("[KERNEL] Project root: " + mk8Root);
 
-            var catalog = new PluginCatalog(mk8Root);
-            Thread.ofVirtual().start(catalog::scan);   // background scan; doesn't block accept
-
             var bus         = new KernelBusImpl(this);
+            var pluginMgr   = new PluginManager(bus, mk8Root);
+            Thread.ofVirtual().start(pluginMgr::scan); // background scan; doesn't block accept
+
             var idempotency = new IdempotencyInterceptor(bus);
-            var capIdx      = new CapabilityIndex(catalog, bus);
-            var procMgr     = new ProcessManager(catalog, bus, mk8Root);
-            capIdx.setProcessManager(procMgr);         // P1: wire trackUsage callback
-            interceptors = List.of(idempotency, capIdx, procMgr);   // immutable after this point
+            var capIdx      = new CapabilityIndex(bus);
+            capIdx.setRuntime(pluginMgr);              // wire PluginRuntime
+            interceptors = List.of(idempotency, capIdx);             // immutable after this point
             // ─────────────────────────────────────────────────────────────────────
 
             while (!Thread.currentThread().isInterrupted()) {
@@ -174,15 +172,8 @@ public class Kernel {
             return;
         }
 
-        // Return routing via pendingRoutes.
-        // Spec defines this only for capability.result/error. blackboard.read.result and
-        // blackboard.query.result are a pragmatic extension: the spec does not specify how
-        // blackboard results are routed back, and using the same correlationId mechanism is
-        // consistent with the existing pattern. The alternative (message.{requesterId})
-        // would require agents to differentiate blackboard results from capability.invokes
-        // in their message.{self} handler.
-        if ("capability.result".equals(type) || "capability.error".equals(type)
-                || "blackboard.read.result".equals(type) || "blackboard.query.result".equals(type)) {
+        // Return routing via pendingRoutes (capability.result/error only — spec-defined).
+        if ("capability.result".equals(type) || "capability.error".equals(type)) {
             String corrId = event.correlationId();
             if (corrId != null) {
                 // Call interceptors for results before returning (allows IdempotencyInterceptor to cache/distribute)
@@ -210,20 +201,12 @@ public class Kernel {
             return;
         }
 
-        // Track senders for return routing (pendingRoutes).
-        // capability.invoke is spec-defined. blackboard.read/query are pragmatic extensions
-        // (see comment above).
+        // Track senders for return routing (pendingRoutes — capability.invoke only).
         if ("capability.invoke".equals(type)) {
             String corrId = event.correlationId();
             if (corrId != null && source.pluginId != null) {
                 pendingRoutes.put(corrId, source.pluginId);
                 System.out.println("[KERNEL] route capability.invoke from=" + source.pluginId + " corrId=" + corrId + " (pending return)");
-            }
-        }
-        if ("blackboard.read".equals(type) || "blackboard.query".equals(type)) {
-            String corrId = event.correlationId();
-            if (corrId != null && source.pluginId != null) {
-                pendingRoutes.put(corrId, source.pluginId);
             }
         }
 
@@ -374,6 +357,25 @@ interface KernelBus {
     void sendTo(String pluginId, String json);
     void route(Event event) throws Exception;
     void removePendingRoute(String corrId);
+}
+
+/**
+ * PluginRuntime — contract between CapabilityIndex and PluginManager.
+ *
+ * Exposes catalog lookups (what exists on disk) and lifecycle operations
+ * (spawn, track, list) through a single interface. CapabilityIndex depends
+ * only on this contract; PluginManager is never referenced directly.
+ */
+interface PluginRuntime {
+    // Catalog
+    void awaitReady(long timeoutMs);
+    PluginManager.CatalogEntry getByCapName(String capName);
+    Collection<PluginManager.CatalogEntry> allEntries();
+    void refresh();
+    // Lifecycle
+    void spawnOnDemand(String capabilityName) throws Exception;
+    void trackUsage(String capabilityName);
+    String listPlugins() throws Exception;
 }
 
 /** Concrete KernelBus backed by a Kernel instance. */

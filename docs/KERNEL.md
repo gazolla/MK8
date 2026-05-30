@@ -120,7 +120,7 @@ The MK8 Kernel-Extendido introduces a stateful interception pipeline. Intercepto
 Incoming Event
      │
      ▼
- pendingRoutes Map Updated (For capability.invoke and blackboard.read)
+ pendingRoutes Map Updated (For capability.invoke)
      │
      ▼
 [IdempotencyInterceptor]
@@ -129,12 +129,8 @@ Incoming Event
      ▼ [Cache Miss / In-Flight Init]
 [CapabilityIndex]
      │
-     ├──[No Live Provider] ──────► [Spawn Request (plugin.load)] ─► (Halt Routing)
+     ├──[No Live Provider] ──────► [runtime.spawnOnDemand()] ──► (Halt Routing)
      ▼ [Active Provider Resolved]
-[ProcessManager]
-     │
-     ├──[Lifecycle Match] ───────► [Spawn/Stop Child Process] ──► (Halt Routing)
-     ▼ [No Matches]
 Standard Broadcast Phase (Exact Match & Wildcard Prefix Search)
      │
      ▼
@@ -152,7 +148,7 @@ Plugins are decoupled from the Kernel codebase and discovered dynamically at boo
 ```mermaid
 flowchart TD
     Start[Kernel Boot] --> FindRoot[Resolve Project Root via findProjectRoot]
-    FindRoot --> TriggerScan[Start PluginCatalog Scan in Virtual Thread]
+    FindRoot --> TriggerScan[Start PluginManager Scan in Virtual Thread]
     TriggerScan --> WalkDirs[Walk Project Directory Tree]
     WalkDirs --> FilterKernel[Exclude /kernel path]
     WalkDirs --> FindJSON[Locate plugin.json files]
@@ -163,5 +159,5 @@ flowchart TD
 
 ### Discovery Heuristics
 1. **Root Resolution**: The Kernel walks up directories starting from the current working directory (`user.dir`) searching for a `kernel` subdirectory or a `Start.java` anchor.
-2. **Directory Scanning**: The `PluginCatalog` walks the resolved project root recursively, filtering for files named `plugin.json` while explicitly ignoring the `kernel/` folder.
-3. **Hot Reloading**: When a `plugin.installed` event is published, the `PluginCatalog` performs a synchronous re-scan inline, refreshing the indexed mappings in real-time.
+2. **Directory Scanning**: `PluginManager` walks the resolved project root recursively, filtering for files named `plugin.json` while explicitly ignoring the `kernel/` folder.
+3. **Hot Reloading**: When a `plugin.installed` event is published, `PluginManager.refresh()` performs a synchronous re-scan inline, refreshing the indexed mappings in real-time.

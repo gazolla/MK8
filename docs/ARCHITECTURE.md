@@ -13,9 +13,8 @@ kernel/
 ├── Kernel.java                 # UDS Server, connection manager, routing maps
 ├── Event.java                  # Unified envelope, frame protocol, configuration loader
 ├── BasePlugin.java             # Connection bootstrap, virtual thread dispatcher
-├── PluginCatalog.java          # File-tree JSON plugin registry and scanner
+├── PluginManager.java          # Plugin discovery, catalog, lifecycle (spawn, kill, track)
 ├── CapabilityIndex.java        # Live registry, bid request broker, auction scheduler
-├── ProcessManager.java         # Lifecycle controller, process launcher, stream logger
 └── IdempotencyInterceptor.java  # Deduplication cache, collapsing set manager
 ```
 
@@ -23,7 +22,7 @@ kernel/
 
 ## 2. Interface Specifications
 
-Decoupling between UDS infrastructure and extension logic is achieved via two core interfaces.
+Decoupling between UDS infrastructure and extension logic is achieved via three core interfaces.
 
 ### `EventInterceptor`
 Interceptors hook directly into the event bus pipeline inside `Kernel.route()`.
@@ -37,6 +36,23 @@ Provides a safe interface for interceptors to re-publish events into the bus or 
 - `void route(Event event) throws Exception`: Serializes and pushes an event through the full Kernel routing pipeline.
 - `void removePendingRoute(String corrId)`: Removes a correlationId from the return-routing table. Used by `IdempotencyInterceptor` after it manually delivers a result, to prevent memory leaks in `pendingRoutes`.
 
+### `PluginRuntime`
+The contract between `CapabilityIndex` and `PluginManager`. `CapabilityIndex` depends only on this interface — it never references `PluginManager` directly.
+
+```java
+interface PluginRuntime {
+    // Catalog
+    void awaitReady(long timeoutMs);
+    PluginManager.CatalogEntry getByCapName(String capName);
+    Collection<PluginManager.CatalogEntry> allEntries();
+    void refresh();
+    // Lifecycle
+    void spawnOnDemand(String capabilityName) throws Exception;
+    void trackUsage(String capabilityName);
+    String listPlugins() throws Exception;
+}
+```
+
 ---
 
 ## 3. Core Infrastructure Classes
@@ -48,8 +64,11 @@ The gateway server managing network sockets and connections.
   - `prefixRoutes`: Tracks wildcard prefix routes (`*` patterns).
   - `byPluginId`: Maps active plugin identifiers to UDS connection handles.
   - `pendingRoutes`: Maps `correlationId` to the source plugin ID for reply routing.
+  - `interceptors`: Immutable `List<EventInterceptor>` wired at boot: `[idempotency, capIdx]`.
+  - `KERNEL_SOURCE`: Synthetic `Connection` used when the kernel re-enters its own routing pipeline (no writer thread started).
 - **Key Methods**:
-  - `main(String[] args)`: Binds UDS socket, starts the `PluginCatalog` scanning thread, constructs the interceptor chain, and runs the socket accept-loop.
+  - `main(String[] args)`: Boots the kernel, wires `PluginManager` + `CapabilityIndex`, starts the background scan, and runs the socket accept-loop.
+  - `start()`: Binds the UDS socket, assembles the interceptor chain, and accepts connections.
   - `route(Event event, String json, Connection source)`: Evaluates destinations based on event types, manages `pendingRoutes`, executes interceptors, and pushes frames.
   - `findProjectRoot()`: Resolves project root by searching parent directories for the `kernel` directory or a `Start.java` anchor.
 
@@ -61,7 +80,6 @@ Defines the structure of messages and physical framing.
 - **Key Methods**:
   - `readFrame(InputStream in)`: Reads a 4-byte header and parses the specified payload size from a UDS stream.
   - `writeFrame(OutputStream out, String json)`: Encapsulates a JSON payload into a length-prefixed frame.
-  - `connectAndRun(String socketPath, PluginConfig config, PluginLogic logic)`: Connects UDS socket, handshakes `plugin.register` and `plugin.ready`, and runs client handler loops.
 
 ### `BasePlugin.java`
 Removes repetitive client connection and registration boilerplate.
@@ -71,7 +89,15 @@ Removes repetitive client connection and registration boilerplate.
 
 ---
 
-## 4. Interceptor Reference (Option B Core)
+## 4. Interceptor Reference
+
+The interceptor chain contains exactly two interceptors, executed in order for every `capability.invoke`:
+
+```
+[IdempotencyInterceptor] → [CapabilityIndex]
+```
+
+`PluginManager` is **not** an interceptor. It is a pure infrastructure service wired directly to `CapabilityIndex` via the `PluginRuntime` interface.
 
 ### `IdempotencyInterceptor.java`
 Acts as the entry barrier for event deduplication and collapsing.
@@ -89,24 +115,31 @@ Maintains live capability provider state and manages auctions.
   - `auctions`: Tracks in-flight `AuctionContext` objects by auction UUID.
 - **Key Methods**:
   - `intercept(Event event, String json)`: Directs invoke queries, processes `capability.register` / `unregister` side-effects, and schedules auctions.
-  - `handleInvoke(Event event)`: Routes to a live provider, falls back to catalog for persistent/on-demand plugins, or queues pending invokes.
+  - `setRuntime(PluginRuntime r)`: Wires the `PluginRuntime` implementation (called once at boot by `Kernel`).
+  - `handleInvoke(Event event)`: Routes to a live provider, falls back to catalog via `PluginRuntime` for persistent/on-demand plugins, or queues pending invokes and calls `runtime.spawnOnDemand()`.
   - `startAuction(String capName, List<Registration> providers, Event invokeEvent)`: Broadcasts `capability.bid.request` and schedules resolution after **500ms**.
   - `resolveAuction(String auctionId)`: Determines the winning provider (highest `score × (1 - load)`) and forwards the queued invocation.
 
-### `ProcessManager.java`
-Coordinates child process spawning and monitoring.
-- **Key Fields**:
-  - `managed`: Map of active `ManagedProcess` records tracking PID and execution handles.
-  - `lastUsed`: Tracks last `capability.invoke` timestamp per plugin for idle-kill checks.
-  - `spawning`: Set of plugin IDs currently being launched, preventing double-spawn on burst `plugin.load` events.
-- **Key Methods**:
-  - `intercept(Event event, String json)`: Intercepts `plugin.load`, `agent.spawn`, `agent.stop`, `agent.idle`, `agent.busy`, `agent.ready`, and `capability.system.plugin.list`.
-  - `handlePluginLoad(Event event)`: Looks up the `CatalogEntry`, builds `ProcessBuilder` with `redirectOutput(Redirect.appendTo(logFile)).redirectErrorStream(true)`, and binds process-exit callbacks.
-  - `trackUsage(String capName)`: Called directly by `CapabilityIndex.handleInvoke()` to update `lastUsed` (bypasses interceptor chain, which stops at CapabilityIndex).
-  - `checkIdlePlugins()`: Invoked every 60 seconds to terminate on-demand plugins exceeding their `idleTimeoutSeconds`.
+---
 
-### `PluginCatalog.java`
-Walks and indexes static plugin capabilities on disk.
+## 5. Infrastructure Service
+
+### `PluginManager.java`
+Single source of truth for plugin discovery and lifecycle. Merges catalog scanning (previously `PluginCatalog`) and process management (previously `ProcessManager`) into one cohesive class. Implements `PluginRuntime`.
+
+- **Key Records**:
+  - `CatalogEntry`: One entry per capability declaration. Fields: `pluginId`, `pluginDir`, `capabilityName`, `triggerEvent`, `onDemand`, `persistent`, `bidWeight`, `idleTimeoutSeconds`, `launchCommand[]`.
+  - `ManagedProcess`: Tracks a running child process. Fields: `pluginId`, `pid`, `pluginDir`, `process`.
+- **Key Fields**:
+  - `byCapName`: Maps capability name → `CatalogEntry`.
+  - `byPluginId`: Maps plugin ID → `List<CatalogEntry>`.
+  - `managed`: Maps plugin ID → `ManagedProcess` (running processes).
+  - `lastUsed`: Tracks last-used timestamp per plugin for idle-kill checks.
+  - `spawning`: Set of plugin IDs currently being launched (prevents double-spawn).
 - **Key Methods**:
-  - `scan()`: Walks directories beneath the resolved project root, ignores the `kernel` path, parses `plugin.json` configurations, and populates index mappings.
-  - `refresh()`: Synchronously re-scans disk structures upon new plugin installations.
+  - `scan()`: Walks directories beneath the resolved project root, ignores the `kernel` path, parses `plugin.json` configurations, and populates index mappings. Called in a virtual thread at boot.
+  - `spawnOnDemand(String capName)`: Looks up the `CatalogEntry`, builds `ProcessBuilder` with `redirectOutput(Redirect.appendTo(logFile)).redirectErrorStream(true)`, and binds process-exit callbacks.
+  - `trackUsage(String capName)`: Updates `lastUsed` for the owning plugin.
+  - `checkIdlePlugins()`: Invoked every 60 seconds to terminate on-demand plugins exceeding their `idleTimeoutSeconds`. Calls `terminatePlugin()` directly — no bus events.
+  - `listPlugins()`: Returns a JSON array of all managed processes and their status.
+  - `refresh()`: Synchronously re-scans disk on `plugin.installed`.

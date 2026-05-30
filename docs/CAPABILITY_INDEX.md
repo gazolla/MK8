@@ -83,7 +83,10 @@ Routes to the appropriate handler based on `event.type()`. Returns `true` (consu
 ### C. Routing and Auction Management
 
 #### `void handleInvoke(Event event)`
-* **Description:** Routes a `capability.invoke` to a live provider. If no live provider is found, consults the `PluginCatalog`: persistent plugins are re-routed via `triggerEvent`; on-demand plugins are queued in `pendingInvokes` and a `plugin.load` event is emitted.
+* **Description:** Routes a `capability.invoke` to a live provider. If no live provider is found, consults the catalog via `PluginRuntime`: persistent plugins are re-routed via `triggerEvent`; on-demand plugins are queued in `pendingInvokes` and `runtime.spawnOnDemand(capName)` is called directly (no bus event).
+
+#### `void setRuntime(PluginRuntime r)`
+* **Description:** Wires the `PluginRuntime` implementation (called once at boot by `Kernel` after both `CapabilityIndex` and `PluginManager` are constructed). Until this is called, `runtime` is `null` and catalog fallbacks are skipped.
 
 #### `void startAuction(String capName, List<Registration> providers, Event invokeEvent)`
 * **Description:** Creates an `AuctionContext`, broadcasts `capability.bid.request` to all candidates, and schedules `resolveAuction()` after a **500ms** window.

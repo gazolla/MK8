@@ -20,8 +20,8 @@ import java.util.concurrent.*;
  *   system.plugin.died/stopped → false (clean up registrations; broadcast continues)
  *   plugin.installed        → false (refresh catalog; broadcast continues for SkillLoader agents)
  *
- * P1 resolution: the interceptor chain stops at the first true. ProcessManager's
- * trackUsage() for capability.invoke is called from within handleInvoke() before routing.
+ * PluginRuntime: CapabilityIndex interacts with PluginManager only through this interface,
+ * covering both catalog lookups and lifecycle operations (spawn, track, list).
  */
 class CapabilityIndex implements EventInterceptor {
 
@@ -65,7 +65,6 @@ class CapabilityIndex implements EventInterceptor {
 
     // ── Fields ────────────────────────────────────────────────────────────────
 
-    private final PluginCatalog                          catalog;
     private final KernelBus                              bus;
     // capName → live providers (plugins currently running and registered)
     private final Map<String, List<Registration>> registrations  = new ConcurrentHashMap<>();
@@ -78,23 +77,20 @@ class CapabilityIndex implements EventInterceptor {
                     Thread.ofVirtual().name("capidx-sched-", 0).factory());
 
     /**
-     * Optional back-reference to ProcessManager for tracking lastUsed on capability.invoke.
-     * Set after construction to avoid circular dependency in constructors.
-     * (P1 resolution: chain stops at first true, so ProcessManager can't receive capability.invoke
-     *  as an interceptor if CapabilityIndex is listed first and returns true.)
+     * PluginRuntime — set after construction to avoid circular dependency.
+     * CapabilityIndex only knows the interface, never the concrete PluginManager.
      */
-    private volatile ProcessManager processManager;
+    private volatile PluginRuntime runtime;
 
     // ── Construction ──────────────────────────────────────────────────────────
 
-    CapabilityIndex(PluginCatalog catalog, KernelBus bus) {
-        this.catalog = catalog;
-        this.bus     = bus;
+    CapabilityIndex(KernelBus bus) {
+        this.bus = bus;
     }
 
-    /** Called from main() after ProcessManager is created. */
-    void setProcessManager(ProcessManager pm) {
-        this.processManager = pm;
+    /** Called from Kernel.start() after PluginManager is created. */
+    void setRuntime(PluginRuntime r) {
+        this.runtime = r;
     }
 
     // ── EventInterceptor ──────────────────────────────────────────────────────
@@ -159,17 +155,23 @@ class CapabilityIndex implements EventInterceptor {
         JsonNode p       = Event.MAPPER.readTree(event.payload());
         String   capName = p.has("name") ? p.get("name").asText() : null;
 
-        // P1: notify ProcessManager to update lastUsed (replaces its broadcast subscription).
-        // Called here because this interceptor returns true — ProcessManager never sees the event.
-        if (processManager != null && capName != null) {
-            processManager.trackUsage(capName);
+        // Notify runtime to update lastUsed — interceptor chain stops here (returns true).
+        if (runtime != null && capName != null) {
+            runtime.trackUsage(capName);
         }
 
-        // Short-circuit: system.capability.list → merged catalog + live registrations
+        // Short-circuits: built-in capabilities handled in-process by the kernel.
         if ("system.capability.list".equals(capName)) {
             String resultPayload = Event.MAPPER.writeValueAsString(
                     Map.of("result", buildCapabilityList()));
             bus.route(Event.withCorrelation("capability.result", resultPayload,
+                    "kernel", event.correlationId(), event.sessionId()));
+            return;
+        }
+        if ("system.plugin.list".equals(capName)) {
+            String result = runtime != null ? runtime.listPlugins() : "[]";
+            bus.route(Event.withCorrelation("capability.result",
+                    Event.MAPPER.writeValueAsString(Map.of("result", result)),
                     "kernel", event.correlationId(), event.sessionId()));
             return;
         }
@@ -182,8 +184,9 @@ class CapabilityIndex implements EventInterceptor {
 
         if (providers == null || providers.isEmpty()) {
             // No live provider — consult catalog
-            catalog.awaitReady(500);
-            PluginCatalog.CatalogEntry entry = capName != null ? catalog.getByCapName(capName) : null;
+            if (runtime != null) runtime.awaitReady(500);
+            PluginManager.CatalogEntry entry = (capName != null && runtime != null)
+                    ? runtime.getByCapName(capName) : null;
 
             if (entry != null) {
                 if (entry.triggerEvent() != null && entry.persistent()) {
@@ -198,12 +201,10 @@ class CapabilityIndex implements EventInterceptor {
                     System.out.println("[CAP-IDX] Catalog route (persistent) → " + entry.triggerEvent());
 
                 } else if (entry.onDemand()) {
-                    // On-demand: queue invoke and trigger load
+                    // On-demand: queue invoke and call runtime directly (no bus event)
                     pendingInvokes.computeIfAbsent(capName, k -> new CopyOnWriteArrayList<>())
                             .add(event);
-                    String loadPayload = Event.MAPPER.writeValueAsString(
-                            Map.of("capability", capName));
-                    bus.route(Event.of("plugin.load", loadPayload, "kernel"));
+                    if (runtime != null) runtime.spawnOnDemand(capName);
                     System.out.println("[CAP-IDX] Queued on-demand invoke for: " + capName);
 
                 } else {
@@ -336,7 +337,8 @@ class CapabilityIndex implements EventInterceptor {
             }));
 
         // Catalog entries for capabilities not currently live (on-demand not yet started, etc.)
-        for (PluginCatalog.CatalogEntry e : catalog.allEntries()) {
+        Collection<PluginManager.CatalogEntry> catalogEntries = runtime != null ? runtime.allEntries() : List.of();
+        for (PluginManager.CatalogEntry e : catalogEntries) {
             if (seen.contains(e.capabilityName())) continue;
             var entry = new LinkedHashMap<String, Object>();
             entry.put("capability", e.capabilityName());
@@ -373,7 +375,7 @@ class CapabilityIndex implements EventInterceptor {
     // ── Plugin installed (hot-reload catalog) ─────────────────────────────────
 
     void handlePluginInstalled() {
-        catalog.refresh(); // synchronous re-scan; fast for small catalogs
+        if (runtime != null) runtime.refresh();
         System.out.println("[CAP-IDX] Catalog refreshed after plugin.installed");
     }
 

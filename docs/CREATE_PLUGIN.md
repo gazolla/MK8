@@ -55,7 +55,7 @@ Create `tools/sentiment-analysis/plugin.json` containing:
 ```
 
 ### Key Fields Explained
-- `lifecycle.mode`: Set to `"on-demand"` so the `ProcessManager` only spawns the tool when `text.sentiment` is invoked, and kills it when idle.
+- `lifecycle.mode`: Set to `"on-demand"` so `PluginManager` only spawns the tool when `text.sentiment` is invoked, and kills it when idle.
 - `launch.command`: The command array used by the kernel to start the process.
 - `capabilities[].triggerEvent`: For tools, this is the event type the kernel routes to the tool. The tool must subscribe to this exact type in its `subscribes` list.
 
@@ -94,18 +94,22 @@ public class SentimentAnalysisTool {
 
     public static void main(String[] args) throws Exception {
         System.out.println("[SENTIMENT] Starting (on-demand)...");
-
-        // BasePlugin.run loads config, connects UDS, registers capability, and runs event loop
-        BasePlugin.run("plugin.json", Event.DEFAULT_SOCKET, (json, out) -> {
-            Event event = Event.MAPPER.readValue(json, Event.class);
-            
-            if ("capability.tool.text.sentiment".equals(event.type())) {
-                handleSentiment(event, out);
-            }
-        });
+        new SentimentAnalysisTool().start();
     }
 
-    private static void handleSentiment(Event event, OutputStream out) throws Exception {
+    void start() throws Exception {
+        // BasePlugin.run loads config, connects UDS, registers capability, and runs event loop
+        BasePlugin.run("plugin.json", Event.DEFAULT_SOCKET, this::handle);
+    }
+
+    void handle(String json, OutputStream out) throws Exception {
+        Event event = Event.MAPPER.readValue(json, Event.class);
+        if ("capability.tool.text.sentiment".equals(event.type())) {
+            handleSentiment(event, out);
+        }
+    }
+
+    void handleSentiment(Event event, OutputStream out) throws Exception {
         // Parse incoming payload
         JsonNode payload = Event.MAPPER.readTree(event.payload());
         String text = payload.path("text").asText("");
@@ -127,9 +131,9 @@ public class SentimentAnalysisTool {
         System.out.println("[SENTIMENT] Done — sentiment=" + sentiment);
     }
 
-    private static String calculateSentiment(String text) {
+    String calculateSentiment(String text) {
         String lower = text.toLowerCase();
-        
+
         // Define simple token sets
         String[] positiveWords = {"happy", "joy", "good", "great", "excellent", "pond", "frog", "splash"};
         String[] negativeWords = {"sad", "bad", "terrible", "poor", "pain", "annoyed", "error"};
@@ -167,7 +171,7 @@ Traditional software and microservice architectures coordinate dependencies usin
 | Architectural Metric | Traditional Coupled Pipelines (REST/gRPC/Imports) | MK8 Decoupled MicroKernel Pipeline |
 | :--- | :--- | :--- |
 | **Service Discovery** | Requires static registry endpoints, configuration management, or dedicated DNS layers. | **Zero-Configuration Dynamic Discovery:** Kernel scans local folders, reads `plugin.json` manifests, and indexes capabilities dynamically on boot. |
-| **Process Lifecycle** | Services must run continuously in memory, consuming background CPU/RAM regardless of use. | **Elastic On-Demand Lifecycles:** The Process Manager launches the plugin process on demand and terminates it after an idle timeout. |
+| **Process Lifecycle** | Services must run continuously in memory, consuming background CPU/RAM regardless of use. | **Elastic On-Demand Lifecycles:** `PluginManager` launches the plugin process on demand and terminates it after an idle timeout. |
 | **Code Coupling** | Compile-time import coupling or heavy runtime dependency wrappers in client code. | **Semantic Messaging Interface:** Clients call capabilities purely by semantic namespace (e.g., `text.sentiment`), remaining agnostic of provider language, PID, or location. |
 | **Concurrency Control**| Custom client-side logic required for thread-safe fan-in, timeouts, and tracking correlation IDs. | **Asynchronous Correlated Boundaries:** Built-in transaction tracing using `correlationId` and `sessionId` managed through lightweight, thread-safe asynchronous routing. |
 | **Request Optimization**| Duplicate concurrent calls generate redundant network traffic and service load unless external caching is configured. | **Kernel-Level Request Collapsing:** Concurrent duplicate invokes are automatically collapsed into a single flight, with results cached and broadcast back to all callers. |
@@ -225,7 +229,7 @@ DemoRunner              Kernel Event Bus            SummaryAgent       WordCount
     │                           │ pendingRoutes[corrC]   │                  │                    │
     │                           │   = "summary-agent"    │                  │                    │
     │                           │                        │                  │                    │
-    │                           │ [ProcessManager boots  │                  │                    │
+    │                           │ [PluginManager boots   │                  │                    │
     │                           │  both tools on-demand] │                  │                    │
     │                           ├────────────────────────┼─────────────────►│                    │
     │                           ├────────────────────────┼──────────────────┼───────────────────►│
@@ -276,10 +280,10 @@ DemoRunner              Kernel Event Bus            SummaryAgent       WordCount
 ### Step-by-Step Integration Guide
 
 #### 1. Capability Discovery
-When the MicroKernel starts up, the `PluginCatalog` searches the directories listed in the workspace (such as `/tools` and `/system`). If it encounters a new plugin directory containing a `plugin.json` manifest:
+When the MicroKernel starts up, `PluginManager` searches the directories listed in the workspace (such as `/tools` and `/system`). If it encounters a new plugin directory containing a `plugin.json` manifest:
 1. It parses the JSON schema.
-2. It indexes all listed capabilities in the `CapabilityIndex`.
-3. It associates the dynamic trigger events (e.g. `capability.tool.text.sentiment`) with the process launch instructions.
+2. It indexes all listed capabilities in its internal catalog.
+3. It associates the dynamic trigger events (e.g. `capability.tool.text.sentiment`) with the process launch instructions. `CapabilityIndex` consults this catalog when routing invocations.
 
 #### 2. Declaring Dependencies and Scope
 To participate in the pipeline, orchestrator agents or callers must register to receive results or event replies. This is achieved by:

@@ -67,7 +67,7 @@ Plugins operate under two primary execution cycles declared in their `plugin.jso
 - Do not shut down automatically on idle periods.
 
 ### On-Demand Mode
-- Loaded dynamically by the `ProcessManager` only when their specific capability is invoked.
+- Loaded dynamically by `PluginManager` only when their specific capability is invoked.
 - Shut down automatically via a scheduled background task if they remain idle longer than their declared `idleTimeoutSeconds` threshold.
 
 ---
@@ -103,4 +103,4 @@ The Kernel routing system combines two distinct routing topologies:
 
 The MicroKernel decouples logs generation from storage mechanics:
 - **No Disk Writing inside Plugins**: Plugin developers simply print statements to standard output (`System.out`) or standard error (`System.err`).
-- **OS-Level Capture**: The Kernel `ProcessManager` captures stdout/stderr of spawned processes at launch, multiplexes them, and redirects the output streams directly into dedicated `.log` files inside the project's root `logs/` directory.
+- **OS-Level Capture**: `PluginManager` captures stdout/stderr of spawned processes at launch via `ProcessBuilder` stream redirection, writing them directly to dedicated `.log` files inside the project's root `logs/` directory.

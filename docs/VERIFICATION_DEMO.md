@@ -64,7 +64,7 @@ The demo orchestrates three main actors alongside the Kernel core. Below is the 
 
 ### C. `WordCountTool` (On-Demand Utility)
 * **Role:** Performs granular textual calculations (counting total words, sentences, unique vocabulary, and computing relative averages). 
-* **Lifecycle:** Elastic and on-demand. Spawns dynamically via the Kernel's `ProcessManager` only when a `text.wordcount` capability invocation occurs, and terminates automatically after a 60-second idle period.
+* **Lifecycle:** Elastic and on-demand. Spawns dynamically via `PluginManager` only when a `text.wordcount` capability invocation occurs, and terminates automatically after a 60-second idle period.
 * **Events Published:**
   * `capability.result` (transmitting JSON-formatted string metrics back to the orchestrator).
 * **Events Consumed:**
@@ -122,7 +122,7 @@ The diagram below details the interaction model across the asynchronous boundari
        │                               │  │ pendingRoutes["corr-sub-word-1"] = "summary-agent"        │
        │                               │◄─┘                           │                               │
        │                               │                              │                               │
-       │                               │──┐ [ProcessManager Checks Tool Status]                       │
+       │                               │──┐ [PluginManager Checks Tool Status]                        │
        │                               │  │ IF WordCountTool offline:                                 │
        │                               │  │ Exec "jbang WordCountTool.java"                            │
        │                               │◄─┘                           │                               │

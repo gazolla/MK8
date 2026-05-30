@@ -1,215 +1,98 @@
 # Event Taxonomy
 
-This document outlines the complete list of system event types and payload conventions used in the MK8 MicroKernel.
+This document lists the event types that the MK8 MicroKernel actually implements and routes. Events are the only communication mechanism between the Kernel and plugins — all messages travel as length-prefixed JSON frames over a Unix Domain Socket at `/tmp/mk7/kernel.sock`.
 
-All communications pass through the Unix Domain Socket at `/tmp/mk7/kernel.sock`. The transfer format is a length-prefixed frame: a 4-byte big-endian header specifying the size, followed by a UTF-8 JSON event string.
+The bus is intentionally extensible: any plugin can publish and subscribe to custom event types. Only the types listed here carry built-in Kernel or interceptor behavior.
 
 ---
 
 ## 1. Unified Event Envelope Schema
 
-Every UDS socket frame contains a serialized JSON event matching this exact properties envelope:
+Every UDS frame carries a serialized JSON event:
 
 ```json
 {
-  "id": "uuid_event_id",
-  "type": "event.type.name",
-  "payload": "stringified_content_or_json",
-  "timestamp": "2026-05-24T19:38:00",
-  "source": "plugin_id_of_sender",
-  "correlationId": "optional_correlation_uuid",
-  "sessionId": "optional_conversation_session_uuid",
-  "workflowId": "optional_workflow_execution_uuid",
-  "replyTo": "optional_target_plugin_id",
-  "traceId": "optional_distributed_trace_uuid",
-  "spanId": "optional_distributed_span_uuid"
+  "id": "7ca62fee-cf82-4ad3-9ef4-d36cb07f18b3",
+  "type": "capability.invoke",
+  "payload": "{\"name\":\"text.analyze\",\"text\":\"An old silent pond...\"}",
+  "timestamp": "2026-05-30T13:45:00.123Z",
+  "source": "demo-runner",
+  "correlationId": "haiku-collapsed-id",
+  "sessionId": "demo-session",
+  "workflowId": null,
+  "replyTo": null,
+  "traceId": null,
+  "spanId": null
 }
 ```
-
-### Distributed Tracing Context (`traceId` and `spanId`)
-For real-time telemetry, debugging, and execution timeline rendering (via `/trace`), the event envelope carries two tracking fields:
-- `traceId` (UUID): A stable ID representing the complete lifecycle of a conversation transaction initiated by a user prompt or slash command.
-- `spanId` (UUID): The local ID of an individual step within the transaction trace (e.g., an LLM call by a secondary agent or a tool invocation).
-
-These IDs are propagated by the Kernel and the active Plugins using transparent `ThreadLocal` structures inside concurrent virtual execution threads.
 
 ### Subscription Matching Styles
-Clients declare their interests during `plugin.register` using two distinct list arrays:
-- `subscribes`: Exact event type matching. Evaluated via $O(1)$ fast-path lookup keys.
-- `wildcardSubscribes`: Prefix-based matching. The wildcard character `*` is valid **only at the very end** of the namespace string.
 
-*Valid wildcards*: `blackboard.updated.session.*`, `blackboard.updated.*`  
-*Invalid wildcards*: `*.research.*`, `blackboard.*.session` (rejected at registration).
+Plugins declare their interests during `plugin.register` using two distinct arrays:
 
----
+- `subscribes`: Exact event type matching — $O(1)$ lookup.
+- `wildcardSubscribes`: Prefix-based matching — `*` is only valid at the end of the string.
 
-## 2. Infrastructure Event Types: `system.*`
-
-```
-system.boot              → Kernel initialization completed
-system.shutdown          → Kernel is actively stopping
-system.health.check      → Periodic diagnostic broadcast query
-system.health.response   → Client response to the health check query
-system.error             → Unrecoverable system execution error
-system.plugin.spawned    → Spawn confirmation: { pluginId|agentId, pid, capability|skillsDir }
-system.plugin.stopped    → Safe process termination: { agentId, pid, reason }
-system.plugin.died       → Unexpected process termination: { pluginId, pid, exitCode }
-```
+*Valid*: `capability.tool.*`, `system.plugin.*`
+*Invalid*: `*.invoke`, `capability.*.result` (rejected at registration).
 
 ---
 
-## 3. Plugin Lifecycle Event Types: `plugin.*`
+## 2. Plugin Lifecycle: `plugin.*`
 
-```
-plugin.register          → Client announces id, subscribes, and publishes properties
-plugin.ready             → Client initialization is complete
-plugin.terminate         → Request for client to gracefully shut down
-plugin.reload            → Request for client configuration/code hot-reload
-plugin.error             → Non-fatal execution error within the client
-plugin.load              → Router requests dynamic spawn: { "capability": "tool.datetime.now" }
-                           → Spawns the child process and publishes system.plugin.spawned
-```
+| Event | Direction | Description |
+| :--- | :--- | :--- |
+| `plugin.register` | Plugin → Kernel | Announces plugin id, subscribes, wildcardSubscribes, and capabilities. First frame on every connection. |
+| `plugin.ready` | Kernel → Plugin | Kernel confirms the plugin is registered and active. |
+| `plugin.installed` | External → Kernel | Signals that a new plugin directory was dropped on disk. `CapabilityIndex` re-scans the catalog on receipt. |
 
 ---
 
-## 4. Agent Lifecycle and Negotiation: `agent.*`
+## 3. Capability Invocation and Discovery: `capability.*`
 
-```
-agent.spawn              → Request process manager to start a secondary agent process
-agent.ready              → Secondary agent process connected and configured
-agent.terminate          → Request to stop agent process
-agent.idle               → Agent reports no active processing task
-agent.busy               → Agent reports processing task in progress
-agent.reload             → Request agent restart
-agent.error              → Non-fatal error in agent processing
-agent.negotiate          → Agent proposes alternative execution parameters (Deprecated)
-agent.negotiate.reply    → Response to agent negotiation proposal (Deprecated)
-```
+The core protocol for service discovery, routing, and result delivery.
 
----
+| Event | Direction | Description |
+| :--- | :--- | :--- |
+| `capability.register` | Plugin → Kernel | Plugin registers a capability it provides. Consumed by `CapabilityIndex`; drains any `pendingInvokes` queued while the plugin was starting. |
+| `capability.unregister` | Plugin → Kernel | Plugin removes a previously registered capability. |
+| `capability.invoke` | Any → Kernel | Invoke a capability by name. `CapabilityIndex` resolves the live provider; `IdempotencyInterceptor` collapses concurrent duplicates. The `correlationId` is stored in `pendingRoutes` to route the result back to the caller. |
+| `capability.result` | Plugin → Kernel | Successful result. `IdempotencyInterceptor` caches the payload and routes to the original caller via `pendingRoutes`. |
+| `capability.error` | Plugin → Kernel | Failure result. Same routing path as `capability.result`. |
+| `capability.query` | Any → Kernel | Requests the list of active capability providers. `CapabilityIndex` replies with `capability.query.result`. |
+| `capability.query.result` | Kernel → Caller | Response to `capability.query`. Payload is a JSON array merging live (`"live": true`) and catalog (`"live": false`) entries. |
+| `capability.bid.request` | Kernel → Candidates | Published by `CapabilityIndex` when multiple providers exist for a capability. Each candidate is expected to reply with `capability.bid.response` within a 500 ms window. |
+| `capability.bid.response` | Plugin → Kernel | Candidate submits its bid: `{ "score": 0.9, "load": 0.1 }`. `CapabilityIndex` selects the winner using `score × (1 − load)`. |
+| `capability.tool.{name}` | Kernel → Tool | Trigger event published by `CapabilityIndex` when it resolves a `capability.invoke` to a tool plugin that declared a `triggerEvent`. Example: `capability.tool.text.wordcount`. |
 
-## 5. Peer-to-Peer Agent Communications: `message.*`
+### Built-in Capability Names
 
-```
-message.{targetId}       → Direct targeted message to a specific agent
-message.reply            → Asynchronous reply mapped via correlationId
-message.broadcast        → Global message broadcast to all active agents
-```
-*Note*: A plugin registers a subscription to `message.{self}`. The Kernel expands this mapping directly to `message.<id>` at registration.
+These names are recognized inside `capability.invoke` payload and handled in-process:
 
----
-
-## 6. Capability Invocation and Discovery: `capability.*`
-
-```
-capability.invoke        → Invoke a capability by name (routed via CapabilityIndex)
-capability.result        → Response containing the successful output of any tool or agent execution
-capability.error         → Response indicating execution failure
-capability.register      → Client registers a capability schema during boot
-capability.unregister    → Client removes a capability schema during shutdown
-capability.query         → Consult which active plugins offer capability X
-capability.query.result  → Consultation outcome response listing providers
-capability.bid.request   → Indexer triggers bidding auction across candidates
-capability.bid.response  → Candidate submits bid: { agentId, score, load }
-capability.bid.accept    → Winner is notified of acceptance
-capability.bid.reject    → Candidates are notified of rejection
-```
-
-### Invocation Timeout Rules
-- **Probe Detection**: **3 seconds**. Quickly identifies when no providers exist without waiting for process timers.
-- **Tools (`tool.*`)**: **90 seconds** final execution limit (accounting for dynamic spawning delay).
-- **Agents (`agent.*`)**: **600 seconds** (10 minutes) final execution limit.
-- **On-Demand Spawn Polling**: Polls every 2 seconds, with a maximum limit of 15 seconds. Exits as soon as the spawned client process registers.
+| Name | Handler | Description |
+| :--- | :--- | :--- |
+| `system.capability.list` | `CapabilityIndex` | Returns a JSON array of all registered capabilities (live + catalog). |
+| `system.plugin.list` | `CapabilityIndex` → `PluginRuntime` | Returns a `capability.result` payload listing all managed plugins and their status (PID, alive, lastUsed). Handled in-process via `runtime.listPlugins()` — no UDS broadcast. |
 
 ---
 
-## 7. Tool Specific Lifecycle: `tool.*`
+## 5. Direct Peer-to-Peer Routing: `message.*`
 
-```
-tool.register            → Announces availability of a new standalone tool
-tool.unregister          → Announces removal of a standalone tool
-```
+| Event | Direction | Description |
+| :--- | :--- | :--- |
+| `message.{pluginId}` | Any → Kernel | Delivers a frame directly to the named plugin connection, bypassing the subscription tables. The Kernel resolves `byPluginId[targetId]` and enqueues the frame. |
 
----
-
-## 8. Shared Knowledge Blackboard: `blackboard.*`
-
-```
-blackboard.write              → Writes or updates an entry (supports LWW or expectedVersion comparison)
-blackboard.write.conflict     → Expected version mismatch; sent directly to the editor
-blackboard.read               → Read a value by key
-blackboard.read.result        → Returns the read result along with its version
-blackboard.delete             → Deletes an entry by key
-blackboard.purge              → Deletes all entries belonging to a specific scope/scopeId
-blackboard.query              → Queries entries by tags, scope, or pattern matching
-blackboard.query.result       → Returns the query results
-blackboard.updated.{scope}.{key} → Reactive update notification (requires wildcard subscription)
-```
-- **Scopes**: `session` (by sessionId), `workflow` (by workflowId), `global`.
-- **Conflicts**: `blackboard.write.conflict` is delivered directly to the editor connection via `message.{solicitanteId}`.
-- **Expiry**: Entries exceeding their `expires_at` value are omitted from queries and reads. Expired values are purged by a cleanup thread every 60 seconds.
+*Example*: `CapabilityIndex` routes a `capability.invoke` for an agent (no `triggerEvent`) by publishing `message.summary-agent` with the original payload.
 
 ---
 
-## 9. DAG Workflow Orchestration: `workflow.*`
+## 6. System Notifications: `system.plugin.*`
 
-```
-workflow.dag             → Submit a Directed Acyclic Graph (DAG) for parallel execution
-workflow.run             → Execute a pre-registered workflow by name
-workflow.cancel          → Cancel an active in-flight workflow
-workflow.dag.result      → DAG execution completed successfully
-workflow.dag.error       → DAG execution failed
-workflow.dag.partial     → DAG execution finished with partial results
-workflow.dag.task.start  → An individual task in the DAG started
-workflow.dag.task.done   → An individual task in the DAG completed
-workflow.dag.task.failed → An individual task in the DAG failed
-workflow.run.result      → Named workflow execution result
-```
+Published by `PluginManager` to notify the bus of child process lifecycle changes.
 
----
+| Event | Publisher | Description |
+| :--- | :--- | :--- |
+| `system.plugin.spawned` | PluginManager | Child process started successfully. Payload: `{ "pluginId": "word-count", "pid": 12345 }`. |
+| `system.plugin.stopped` | PluginManager | Child process terminated (idle-timeout or explicit kill). |
+| `system.plugin.died` | PluginManager | Child process exited unexpectedly (non-zero exit code or crash). `CapabilityIndex` removes its registrations on receipt. |
 
-## 10. Session Context Management: `session.*`
-
-```
-session.create           → Initializes a new conversation session
-session.close            → Safe session closure and cleanup
-session.context.get      → Request session context snapshot history
-session.context.result   → Session context snapshot returned
-session.handoff          → Transfer conversational session to another agent
-session.summary.request  → Request agent summarization of session history
-session.summary.result   → Session history summary returned
-```
-
----
-
-## 11. Chat and User Interface: `chat.*`
-
-```
-chat.prompt              → Raw user input message
-chat.response            → Final agent response output to the user
-chat.typing              → Visual typing indicator state (simple "." on Console, typing status on Telegram)
-chat.thinking            → Progressive feedback indicator; payload = serialized ThinkingConfig
-chat.command.request     → Slash command request initiated by the user
-chat.command.result      → Executed slash command outcome response
-chat.error               → Execution error within the chat processing pipeline
-```
-
-### Payload Structure of `chat.thinking`
-```json
-{
-  "steps": [
-    "⏳ Thinking...",
-    "⏳ Analyzing...",
-    "⏳ Gathering data...",
-    "⏳ Processing...",
-    "⏳ Almost there...",
-    "⏳ Refining...",
-    "⏳ Finalizing...",
-    "⏳ One more moment..."
-  ],
-  "cycleDelayMs": 12000,
-  "backgroundThresholdMs": 120000,
-  "background": "⏳ Still working on it. I'll notify you here when ready! 🔔"
-}
-```
-Assigned via the `"thinking"` block configuration in `plugin.json` for user-facing agents. Published by `AgentCore.handleChatPrompt()` immediately after dispatching `chat.typing` and prior to acquiring the session execution lock.
