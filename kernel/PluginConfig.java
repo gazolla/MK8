@@ -1,5 +1,4 @@
 // Shared file — included via //SOURCES in each plugin (no JBang header).
-// Full mapping of plugin.json — single record, parsed via JsonNode.
 
 import com.fasterxml.jackson.databind.JsonNode;
 import java.nio.file.Files;
@@ -7,6 +6,21 @@ import java.nio.file.Path;
 import java.util.ArrayList;
 import java.util.List;
 
+/**
+ * PluginConfig — Typed, lazy-accessor wrapper around a plugin's plugin.json manifest.
+ *
+ * Wraps the raw Jackson JsonNode tree representing the plugin configuration.
+ * By avoiding static POJO bindings, it remains lightweight and compatible with
+ * JBang single-file compilation while providing structured accessors for all fields.
+ * Accessors are organized into section-specific groups covering root identity,
+ * capability declarations, wildcard subscriptions, and launch commands.
+ *
+ * Provides typed getters with safe defaults for LLM configurations (model, baseUrl,
+ * apiKeyEnv), agent execution limits (max rounds, tool calls, tool tags), and
+ * progressive user-facing thinking indicators. Safe fallback values ensure that
+ * missing json fields never throw Exceptions, making it extremely robust.
+ * Loader method automatically handles reading from disk and parsing into records.
+ */
 record PluginConfig(JsonNode raw) {
 
     // root
@@ -65,7 +79,7 @@ record PluginConfig(JsonNode raw) {
 
     public static PluginConfig load(String jsonPath) throws Exception {
         System.out.println("[EVENT] Loading config: " + jsonPath);
-        return new PluginConfig(Event.MAPPER.readTree(Files.readString(Path.of(jsonPath))));
+        return new PluginConfig(KernelEvent.MAPPER.readTree(Files.readString(Path.of(jsonPath))));
     }
 
     // ── helpers ───────────────────────────────────────────────────────────────

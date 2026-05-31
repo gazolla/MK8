@@ -2,9 +2,9 @@
 //JAVA 21+
 //DEPS com.fasterxml.jackson.core:jackson-databind:2.17.2
 //DEPS com.fasterxml.jackson.datatype:jackson-datatype-jsr310:2.17.2
-//SOURCES ../../kernel/Event.java
+//SOURCES ../../kernel/KernelEvent.java
 //SOURCES ../../kernel/PluginConfig.java
-//SOURCES ../../kernel/BasePlugin.java
+//SOURCES ../../kernel/PluginBase.java
 
 import com.fasterxml.jackson.databind.JsonNode;
 import java.io.OutputStream;
@@ -12,37 +12,39 @@ import java.util.*;
 import java.util.stream.Collectors;
 
 /**
- * WordCountTool — on-demand tool plugin.
+ * WordCountTool — On-demand tool plugin for text statistical analysis.
  *
- * Demonstrates:
- *   - Tool registration with triggerEvent (capability.tool.text.wordcount)
- *   - CapabilityIndex routes capability.invoke{name:"text.wordcount"} here
- *     by re-publishing as the triggerEvent type
- *   - Plugin is started on-demand by ProcessManager when first invoked
- *   - After idleTimeoutSeconds (60s) without traffic, ProcessManager kills it
+ * Implements the text.wordcount capability as a leaf worker in the MK8 pipeline.
+ * It is designed as an on-demand plugin: it is launched automatically by the
+ * PluginManager when a request arrives, and is terminated after 60 seconds of idle time.
+ * Operates under the trigger event model, subscribing directly to rewritten
+ * capability.tool.text.wordcount events published by the CapabilityInterceptor.
  *
- * Input payload:  { "text": "...", "correlationId": "..." }
- * Output event:   capability.result { "result": { "words": N, "sentences": N, "unique": N, "topWords": [...] } }
+ * Splits the target text on whitespace to calculate word count, extracts sentences,
+ * strips punctuation, and builds lowercase term frequency tables. It determines
+ * unique word metrics, extracts the top-5 most frequent words, and formats average
+ * words per sentence. Serializes metrics into a double-nested JSON result format
+ * to allow downstream consumers to parse the output without shared schemas.
  */
 public class WordCountTool {
 
     public static void main(String[] args) throws Exception {
-        Event.initLogging();
+        KernelEvent.initLogging();
         new WordCountTool().start();
     }
 
     void start() throws Exception {
         System.out.println("[WORD-COUNT] Starting (on-demand)...");
-        BasePlugin.run("plugin.json", Event.DEFAULT_SOCKET, this::handle);
+        PluginBase.run("plugin.json", KernelEvent.DEFAULT_SOCKET, this::handle);
     }
 
     void handle(String json, OutputStream out) throws Exception {
-        Event event = Event.MAPPER.readValue(json, Event.class);
+        KernelEvent event = KernelEvent.MAPPER.readValue(json, KernelEvent.class);
 
         // Only handle our trigger event
         if (!"capability.tool.text.wordcount".equals(event.type())) return;
 
-        JsonNode payload = Event.MAPPER.readTree(event.payload());
+        JsonNode payload = KernelEvent.MAPPER.readTree(event.payload());
         String   text    = payload.path("text").asText("").trim();
 
         if (text.isBlank()) {
@@ -83,12 +85,12 @@ public class WordCountTool {
         result.put("topWords",  topWords);
         result.put("avgWordsPerSentence", String.format("%.1f", (double) wordCount / sentenceCount));
 
-        String resultPayload = Event.MAPPER.writeValueAsString(
-                Map.of("result", Event.MAPPER.writeValueAsString(result)));
+        String resultPayload = KernelEvent.MAPPER.writeValueAsString(
+                Map.of("result", KernelEvent.MAPPER.writeValueAsString(result)));
 
         // Reply via capability.result — Kernel routes back to caller via pendingRoutes (correlationId)
-        BasePlugin.publish(
-                Event.withCorrelation("capability.result", resultPayload,
+        PluginBase.publish(
+                KernelEvent.withCorrelation("capability.result", resultPayload,
                         "word-count", event.correlationId(), event.sessionId()),
                 out);
 
@@ -96,11 +98,11 @@ public class WordCountTool {
                 + " sentences=" + sentenceCount + " unique=" + freq.size());
     }
 
-    void publishError(Event origin, String reason, OutputStream out) {
+    void publishError(KernelEvent origin, String reason, OutputStream out) {
         try {
-            String payload = Event.MAPPER.writeValueAsString(Map.of("reason", reason));
-            BasePlugin.publish(
-                    Event.withCorrelation("capability.error", payload,
+            String payload = KernelEvent.MAPPER.writeValueAsString(Map.of("reason", reason));
+            PluginBase.publish(
+                    KernelEvent.withCorrelation("capability.error", payload,
                             "word-count", origin.correlationId(), origin.sessionId()),
                     out);
         } catch (Exception ignored) {}

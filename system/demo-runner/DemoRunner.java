@@ -2,9 +2,9 @@
 //JAVA 21+
 //DEPS com.fasterxml.jackson.core:jackson-databind:2.17.2
 //DEPS com.fasterxml.jackson.datatype:jackson-datatype-jsr310:2.17.2
-//SOURCES ../../kernel/Event.java
+//SOURCES ../../kernel/KernelEvent.java
 //SOURCES ../../kernel/PluginConfig.java
-//SOURCES ../../kernel/BasePlugin.java
+//SOURCES ../../kernel/PluginBase.java
 
 import com.fasterxml.jackson.databind.JsonNode;
 import java.io.OutputStream;
@@ -12,26 +12,19 @@ import java.util.*;
 import java.util.concurrent.*;
 
 /**
- * DemoRunner — system orchestrator plugin.
+ * DemoRunner — Integration verification client for the MK8 interceptor pipeline.
  *
- * Demonstrates:
- *   - Capability invocation from a system plugin (no LLM required)
- *   - Sending multiple requests and correlating responses via correlationId
- *   - system.plugin.spawned observation (watching on-demand plugins start)
- *   - Clean result fan-in across multiple concurrent invocations
+ * A transient verification plugin that starts up, executes a predetermined sequence of
+ * capability invocations, prints a detailed success summary, and exits automatically.
+ * It is designed specifically to test and validate two microkernel optimizations:
+ * 1. Single-Flight request collapsing: Dispatches concurrent requests sharing the same
+ *    correlation ID, verifying that only one invocation reaches the agent downstream.
+ * 2. Sliding-window idempotency caching: Sends subsequent sequential requests to
+ *    prove they are served instantly from the kernel memory cache in less than 1 ms.
  *
- * Full event flow exercised:
- *   1. capability.invoke {name:"text.analyze"}
- *      → CapabilityIndex: no triggerEvent on SummaryAgent → message.summary-agent
- *      → SummaryAgent: capability.invoke {name:"text.wordcount"}
- *         → CapabilityIndex: triggerEvent = "capability.tool.text.wordcount"
- *         → ProcessManager: on-demand spawn of WordCountTool
- *         → system.plugin.spawned {pluginId:"word-count"}  (we observe this)
- *         → WordCountTool handles event, returns capability.result
- *         → pendingRoutes → SummaryAgent
- *      → SummaryAgent builds summary, returns capability.result
- *      → pendingRoutes → DemoRunner
- *   2. (repeat for each sample text)
+ * Leverages CountDownLatch to track deliveries and coordinates the exact execution of
+ * both tests. Also subscribes to system.plugin.spawned telemetry to print the
+ * real-time process IDs of on-demand tools started by the Kernel during the run.
  */
 public class DemoRunner {
 
@@ -65,7 +58,7 @@ public class DemoRunner {
             new java.util.concurrent.atomic.AtomicBoolean(false);
 
     public static void main(String[] args) throws Exception {
-        Event.initLogging();
+        KernelEvent.initLogging();
         System.out.println("╔══════════════════════════════════════════════════════╗");
         System.out.println("║    MK8 Kernel-Extendido — Idempotency & Collapsing    ║");
         System.out.println("║  3 plugins: DemoRunner → SummaryAgent → WordCount    ║");
@@ -75,11 +68,11 @@ public class DemoRunner {
     }
 
     void start() throws Exception {
-        BasePlugin.run("plugin.json", Event.DEFAULT_SOCKET, this::handle);
+        PluginBase.run("plugin.json", KernelEvent.DEFAULT_SOCKET, this::handle);
     }
 
     void handle(String json, OutputStream out) throws Exception {
-        Event event = Event.MAPPER.readValue(json, Event.class);
+        KernelEvent event = KernelEvent.MAPPER.readValue(json, KernelEvent.class);
         switch (event.type()) {
             case "plugin.ready"          -> handleReady(event, out);
             case "capability.result"     -> handleResult(event, out);
@@ -90,7 +83,7 @@ public class DemoRunner {
 
     // ── On ready: wait a bit then fire all requests ───────────────────────────
 
-    void handleReady(Event event, OutputStream out) throws Exception {
+    void handleReady(KernelEvent event, OutputStream out) throws Exception {
         // Enforce single execution check to prevent duplicate triggers from other plugins' ready events
         if (!testStarted.compareAndSet(false, true)) {
             return;
@@ -157,20 +150,20 @@ public class DemoRunner {
 
         pending.put(corrId, label);
 
-        String payload = Event.MAPPER.writeValueAsString(Map.of(
+        String payload = KernelEvent.MAPPER.writeValueAsString(Map.of(
                 "name", "text.analyze",
                 "text", text));
 
         // 1. Send concurrent request #1
-        BasePlugin.publish(
-                Event.withCorrelation("capability.invoke", payload,
+        PluginBase.publish(
+                KernelEvent.withCorrelation("capability.invoke", payload,
                         "demo-runner", corrId, "demo-session"),
                 out);
         System.out.println("[DEMO] → Sent concurrent request #1 corrId=" + corrId);
 
         // 2. Send duplicate concurrent request #2 instantly
-        BasePlugin.publish(
-                Event.withCorrelation("capability.invoke", payload,
+        PluginBase.publish(
+                KernelEvent.withCorrelation("capability.invoke", payload,
                         "demo-runner", corrId, "demo-session"),
                 out);
         System.out.println("[DEMO] → Sent concurrent request #2 (duplicate) corrId=" + corrId);
@@ -179,14 +172,14 @@ public class DemoRunner {
 
     // ── Handle capability.result ──────────────────────────────────────────────
 
-    void handleResult(Event event, OutputStream out) throws Exception {
+    void handleResult(KernelEvent event, OutputStream out) throws Exception {
         String corrId = event.correlationId();
         // Remove only on the last expected result (latch=1); keep the entry for earlier deliveries
         // so that collapsed duplicates and the cache-hit request all pass the null-check.
         String label = latch.getCount() == 1 ? pending.remove(corrId) : pending.get(corrId);
         if (label == null) return;
 
-        JsonNode wrapper = Event.MAPPER.readTree(event.payload());
+        JsonNode wrapper = KernelEvent.MAPPER.readTree(event.payload());
         String   result  = wrapper.path("result").asText("");
 
         // Synchronize on System.out to guarantee the block is printed atomicly without thread interleaving
@@ -209,13 +202,13 @@ public class DemoRunner {
                     System.out.println("[DEMO] === RUNNING SEQUENTIAL CACHE HIT TEST ===");
                     System.out.println("[DEMO] Sending duplicate request #3 sequentially (corrId=" + corrId + ")...");
                     
-                    String payload = Event.MAPPER.writeValueAsString(Map.of(
+                    String payload = KernelEvent.MAPPER.writeValueAsString(Map.of(
                             "name", "text.analyze",
                             "text", "An old silent pond a frog jumps into the pond splash silence again."));
                     
                     long start = System.currentTimeMillis();
-                    BasePlugin.publish(
-                            Event.withCorrelation("capability.invoke", payload,
+                    PluginBase.publish(
+                            KernelEvent.withCorrelation("capability.invoke", payload,
                                     "demo-runner", corrId, "demo-session"),
                             out);
                     System.out.println("[DEMO] → Sent sequential request #3 in " + (System.currentTimeMillis() - start) + "ms");
@@ -228,20 +221,20 @@ public class DemoRunner {
 
     // ── Handle capability.error ───────────────────────────────────────────────
 
-    void handleError(Event event, OutputStream out) throws Exception {
+    void handleError(KernelEvent event, OutputStream out) throws Exception {
         String corrId = event.correlationId();
         String label  = pending.get(corrId);
         if (label == null) return;
 
-        JsonNode err = Event.MAPPER.readTree(event.payload());
+        JsonNode err = KernelEvent.MAPPER.readTree(event.payload());
         System.err.println("[DEMO] ❌ Error for '" + label + "': " + err.path("reason").asText());
         latch.countDown();
     }
 
     // ── Observe on-demand plugin lifecycle ────────────────────────────────────
 
-    void handleSpawned(Event event, OutputStream out) throws Exception {
-        JsonNode p = Event.MAPPER.readTree(event.payload());
+    void handleSpawned(KernelEvent event, OutputStream out) throws Exception {
+        JsonNode p = KernelEvent.MAPPER.readTree(event.payload());
         String pluginId = p.has("pluginId") ? p.get("pluginId").asText()
                         : p.path("agentId").asText("?");
         long pid = p.path("pid").asLong(0);

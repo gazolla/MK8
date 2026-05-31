@@ -2,9 +2,9 @@
 //JAVA 21+
 //DEPS com.fasterxml.jackson.core:jackson-databind:2.17.2
 //DEPS com.fasterxml.jackson.datatype:jackson-datatype-jsr310:2.17.2
-//SOURCES ../../kernel/Event.java
+//SOURCES ../../kernel/KernelEvent.java
 //SOURCES ../../kernel/PluginConfig.java
-//SOURCES ../../kernel/BasePlugin.java
+//SOURCES ../../kernel/PluginBase.java
 
 import com.fasterxml.jackson.databind.JsonNode;
 import java.io.OutputStream;
@@ -12,38 +12,19 @@ import java.util.*;
 import java.util.concurrent.*;
 
 /**
- * SummaryAgent — persistent agent plugin.
+ * SummaryAgent — Persistent orchestrator plugin for text analysis.
  *
- * Demonstrates:
- *   - Agent registration WITHOUT triggerEvent
- *     → CapabilityIndex routes capability.invoke{name:"text.analyze"} via message.summary-agent
- *   - Agent-to-tool invocation: sends capability.invoke{name:"text.wordcount"} internally
- *   - Pending call tracking: stores correlation state while waiting for tool response
- *   - capability.result fan-in: matches incoming results to pending requests via correlationId
+ * A persistent system plugin that connects at startup and handles the text.analyze
+ * capability. Since it functions as an agent orchestrator, it contains no trigger
+ * event declarations. Instead, the CapabilityInterceptor resolves its invocations
+ * by sending direct peer-to-peer message frames, which this agent processes.
  *
- * Interaction flow:
- *   DemoRunner                   Kernel                  SummaryAgent          WordCountTool
- *      │ capability.invoke         │                          │                     │
- *      │ {name:"text.analyze"}     │                          │                     │
- *      ├──────────────────────────►│                          │                     │
- *      │                          │ pendingRoutes[corrA]=demo │                     │
- *      │                          │ interceptors.route →      │                     │
- *      │                          │ message.summary-agent     │                     │
- *      │                          ├─────────────────────────►│                     │
- *      │                          │                          │ capability.invoke    │
- *      │                          │                          │ {name:"text.wordcount"│
- *      │                          │                          ├────────────────────►│
- *      │                          │ pendingRoutes[corrB]=     │                     │
- *      │                          │   summary-agent          │                     │
- *      │                          │ ProcessManager spawns WordCountTool on-demand   │
- *      │                          │                          │  capability.result  │
- *      │                          │◄────────────────────────────────────────────────┤
- *      │                          │ pendingRoutes[corrB]→    │                     │
- *      │                          │   summary-agent          │                     │
- *      │                          ├─────────────────────────►│                     │
- *      │                          │  capability.result       │                     │
- *      │◄──────────────────────────┤ pendingRoutes[corrA]→   │                     │
- *      │                          │   demo-runner            │                     │
+ * When an analysis is requested, SummaryAgent delegates the heavy calculations to
+ * the text.wordcount capability (implemented by WordCountTool) using a freshly generated
+ * correlation ID. It maintains mapping state (PendingAnalysis) internally to relate
+ * outer client correlations with inner tool requests. Upon tool completion,
+ * it computes statistics, evaluates vocabulary richness, compiles a beautiful
+ * markdown report, and replies back to the original client correlation context.
  */
 public class SummaryAgent {
 
@@ -53,17 +34,17 @@ public class SummaryAgent {
     record PendingAnalysis(String outerCorrelationId, String sessionId, String originalText) {}
 
     public static void main(String[] args) throws Exception {
-        Event.initLogging();
+        KernelEvent.initLogging();
         new SummaryAgent().start();
     }
 
     void start() throws Exception {
         System.out.println("[SUMMARY-AGENT] Starting...");
-        BasePlugin.run("plugin.json", Event.DEFAULT_SOCKET, this::handle);
+        PluginBase.run("plugin.json", KernelEvent.DEFAULT_SOCKET, this::handle);
     }
 
     void handle(String json, OutputStream out) throws Exception {
-        Event event = Event.MAPPER.readValue(json, Event.class);
+        KernelEvent event = KernelEvent.MAPPER.readValue(json, KernelEvent.class);
 
         switch (event.type()) {
             case "message.summary-agent" -> handleAnalyzeRequest(event, out);
@@ -74,8 +55,8 @@ public class SummaryAgent {
 
     // ── Step 1: receive analyze request → delegate to WordCountTool ──────────
 
-    void handleAnalyzeRequest(Event event, OutputStream out) throws Exception {
-        JsonNode payload = Event.MAPPER.readTree(event.payload());
+    void handleAnalyzeRequest(KernelEvent event, OutputStream out) throws Exception {
+        JsonNode payload = KernelEvent.MAPPER.readTree(event.payload());
         String   text    = payload.path("text").asText("").trim();
 
         System.out.println("[SUMMARY-AGENT] Analyze request: \""
@@ -95,14 +76,14 @@ public class SummaryAgent {
         pending.put(innerCorrId, new PendingAnalysis(
                 event.correlationId(), event.sessionId(), text));
 
-        String invokePayload = Event.MAPPER.writeValueAsString(Map.of(
+        String invokePayload = KernelEvent.MAPPER.writeValueAsString(Map.of(
                 "name", "text.wordcount",
                 "text", text));
 
-        // CapabilityIndex intercepts this → routes to WordCountTool (spawning it on-demand if needed)
+        // CapabilityInterceptor intercepts this → routes to WordCountTool (spawning it on-demand if needed)
         // pendingRoutes[innerCorrId] = "summary-agent" so the result comes back to us
-        BasePlugin.publish(
-                Event.withCorrelation("capability.invoke", invokePayload,
+        PluginBase.publish(
+                KernelEvent.withCorrelation("capability.invoke", invokePayload,
                         "summary-agent", innerCorrId, event.sessionId()),
                 out);
 
@@ -111,7 +92,7 @@ public class SummaryAgent {
 
     // ── Step 2: receive tool result → build summary → reply to DemoRunner ────
 
-    void handleToolResult(Event event, OutputStream out) throws Exception {
+    void handleToolResult(KernelEvent event, OutputStream out) throws Exception {
         String corrId = event.correlationId();
         PendingAnalysis ctx = pending.remove(corrId);
 
@@ -123,8 +104,8 @@ public class SummaryAgent {
         System.out.println("[SUMMARY-AGENT] Tool result received corrId=" + corrId);
 
         // Parse the nested result (WordCountTool wraps it in { "result": "...json..." })
-        JsonNode wrapper = Event.MAPPER.readTree(event.payload());
-        JsonNode stats   = Event.MAPPER.readTree(wrapper.path("result").asText("{}"));
+        JsonNode wrapper = KernelEvent.MAPPER.readTree(event.payload());
+        JsonNode stats   = KernelEvent.MAPPER.readTree(wrapper.path("result").asText("{}"));
 
         int    words     = stats.path("words").asInt(0);
         int    sentences = stats.path("sentences").asInt(0);
@@ -151,12 +132,12 @@ public class SummaryAgent {
         publishResult(ctx.outerCorrelationId(), ctx.sessionId(), summary, out);
     }
 
-    void handleToolError(Event event, OutputStream out) throws Exception {
+    void handleToolError(KernelEvent event, OutputStream out) throws Exception {
         String corrId = event.correlationId();
         PendingAnalysis ctx = pending.remove(corrId);
         if (ctx == null) return;
 
-        JsonNode err = Event.MAPPER.readTree(event.payload());
+        JsonNode err = KernelEvent.MAPPER.readTree(event.payload());
         String reason = err.path("reason").asText("unknown error");
         System.err.println("[SUMMARY-AGENT] Tool error: " + reason);
         publishResult(ctx.outerCorrelationId(), ctx.sessionId(),
@@ -167,10 +148,10 @@ public class SummaryAgent {
 
     void publishResult(String corrId, String sessionId, String summary, OutputStream out)
             throws Exception {
-        String payload = Event.MAPPER.writeValueAsString(
+        String payload = KernelEvent.MAPPER.writeValueAsString(
                 Map.of("result", summary));
-        BasePlugin.publish(
-                Event.withCorrelation("capability.result", payload,
+        PluginBase.publish(
+                KernelEvent.withCorrelation("capability.result", payload,
                         "summary-agent", corrId, sessionId),
                 out);
         System.out.println("[SUMMARY-AGENT] Result sent corrId=" + corrId);

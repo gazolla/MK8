@@ -4,7 +4,7 @@ This document outlines the architectural patterns and communication protocols im
 
 ---
 
-## 1. Event Bus and UDS Protocol
+## 1. KernelEvent Bus and UDS Protocol
 
 The system runs on an asynchronous event bus communicating via Unix Domain Sockets (UDS) located at `/tmp/mk8/kernel.sock`. 
 
@@ -13,7 +13,7 @@ To guarantee message integrity without parsing streams line-by-line, the system 
 - **Header**: 4-byte big-endian integer specifying the payload size in bytes.
 - **Payload**: UTF-8 encoded JSON string matching the unified event envelope schema.
 
-### Unified Event Envelope Schema
+### Unified KernelEvent Envelope Schema
 All transmissions must conform to the unified event record structure containing:
 - `id`: Unique event identifier (UUID).
 - `type`: Routing classifier (e.g., `capability.invoke`).
@@ -79,7 +79,7 @@ To trace requests passing across process and socket boundaries, the Kernel propa
 - **Trace ID**: A global identifier unique to a specific transaction path.
 - **Span ID**: A local identifier unique to an individual execution unit.
 
-When `BasePlugin` receives a frame, it deserializes the tracing context, loads the IDs into a `ThreadLocal` structure within the virtual execution thread, and propagates them on any outbound events. The context is safely cleared upon thread termination.
+When `PluginBase` receives a frame, it deserializes the tracing context, loads the IDs into a `ThreadLocal` structure within the virtual execution thread, and propagates them on any outbound events. The context is safely cleared upon thread termination.
 
 ---
 

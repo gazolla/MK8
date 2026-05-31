@@ -2,9 +2,9 @@
 //JAVA 21+
 //DEPS com.fasterxml.jackson.core:jackson-databind:2.17.2
 //DEPS com.fasterxml.jackson.datatype:jackson-datatype-jsr310:2.17.2
-//SOURCES Event.java
+//SOURCES KernelEvent.java
 //SOURCES PluginManager.java
-//SOURCES CapabilityIndex.java
+//SOURCES CapabilityInterceptor.java
 //SOURCES IdempotencyInterceptor.java
 
 import com.fasterxml.jackson.databind.JsonNode;
@@ -22,21 +22,24 @@ import java.util.*;
 import java.util.concurrent.*;
 
 /**
- * MK8 Kernel — plugin-agnostic UDS event bus.
+ * Kernel — The central event bus and connection manager of the MK8 MicroKernel.
  *
- * Routing tables (built at runtime from plugin.register):
- *   exactRoutes   — event.type  → List<Connection>  (O(1) dispatch)
- *   prefixRoutes  — prefix      → List<Connection>  (wildcard, * only at end)
- *   byPluginId    — pluginId    → Connection         (direct message.{id} routing)
- *   pendingRoutes — correlationId → pluginId         (capability.result return routing)
+ * The Kernel runs a Unix Domain Socket (UDS) server to accept plugin connections.
+ * Each connection gets dedicated virtual reader and writer threads to decouple
+ * routing logic from socket IO, preventing head-of-line blocking across plugins.
+ * It maintains concurrent routing maps for exact, prefix, plugin ID, and pending routes.
  *
- * Frame protocol: 4 bytes big-endian length + UTF-8 JSON payload.
- * Each Connection has a dedicated writer thread draining its writeQueue — FIFO per destination.
+ * Events are routed via direct message envelopes or a broadcast pipeline. The Kernel
+ * maintains a pluggable list of EventInterceptors (Idempotency and Capability)
+ * that run sequentially on inbound invokes. If any interceptor returns true,
+ * the event is consumed and routing stops, otherwise standard broadcast takes place.
+ * The Kernel dynamically discovers the project root and initializes the PluginManager
+ * to coordinate background catalog scanning and process lifecycle events.
  */
 public class Kernel {
 
     // Socket path — override at runtime with -Dmk8.socket=/path/to/kernel.sock
-    static final Path SOCKET_PATH = Path.of(Event.DEFAULT_SOCKET);
+    static final Path SOCKET_PATH = Path.of(KernelEvent.DEFAULT_SOCKET);
 
     // ── Instance-owned routing tables ────────────────────────────────────────
     final ConcurrentHashMap<String, CopyOnWriteArrayList<Connection>> exactRoutes  = new ConcurrentHashMap<>();
@@ -56,7 +59,7 @@ public class Kernel {
     // ── Entry point ───────────────────────────────────────────────────────────
 
     public static void main(String[] args) throws Exception {
-        Event.initLogging();
+        KernelEvent.initLogging();
         new Kernel().start();
     }
 
@@ -76,7 +79,7 @@ public class Kernel {
                 System.out.println("[KERNEL] Shut down.");
             }));
 
-            // ── Option B boot — wire PluginManager + CapabilityIndex ──────────
+            // ── Option B boot — wire PluginManager + CapabilityInterceptor ──────────
             Path mk8Root = findProjectRoot();
             System.out.println("[KERNEL] Project root: " + mk8Root);
 
@@ -85,7 +88,7 @@ public class Kernel {
             Thread.ofVirtual().start(pluginMgr::scan); // background scan; doesn't block accept
 
             var idempotency = new IdempotencyInterceptor(bus);
-            var capIdx      = new CapabilityIndex(bus);
+            var capIdx      = new CapabilityInterceptor(bus);
             capIdx.setRuntime(pluginMgr);              // wire PluginRuntime
             interceptors = List.of(idempotency, capIdx);             // immutable after this point
             // ─────────────────────────────────────────────────────────────────────
@@ -104,8 +107,8 @@ public class Kernel {
         try {
             InputStream  in  = Channels.newInputStream(channel);
             String json;
-            while ((json = Event.readFrame(in)) != null) {
-                Event event = Event.MAPPER.readValue(json, Event.class);
+            while ((json = KernelEvent.readFrame(in)) != null) {
+                KernelEvent event = KernelEvent.MAPPER.readValue(json, KernelEvent.class);
                 if ("plugin.register".equals(event.type())) {
                     conn = register(event, channel);
                 } else if (conn != null) {
@@ -123,8 +126,8 @@ public class Kernel {
 
     // ── Registration ──────────────────────────────────────────────────────────
 
-    Connection register(Event event, SocketChannel channel) throws Exception {
-        JsonNode cfg      = Event.MAPPER.readTree(event.payload());
+    Connection register(KernelEvent event, SocketChannel channel) throws Exception {
+        JsonNode cfg      = KernelEvent.MAPPER.readTree(event.payload());
         String   pluginId = cfg.path("id").asText("");
         Connection conn   = new Connection(pluginId, channel);
 
@@ -163,7 +166,7 @@ public class Kernel {
 
     // ── Routing ───────────────────────────────────────────────────────────────
 
-    void route(Event event, String json, Connection source) {
+    void route(KernelEvent event, String json, Connection source) {
         String type = event.type();
 
         // Direct: message.{targetId}
@@ -250,7 +253,7 @@ public class Kernel {
             }
         } else if (!type.startsWith("plugin.")
                 && !"capability.register".equals(type)) {
-            // capability.register is handled in-process by CapabilityIndex (side-effect, no UDS subscribers
+            // capability.register is handled in-process by CapabilityInterceptor (side-effect, no UDS subscribers
             // after CapabilityRegistry was removed). All other events without subscribers are worth logging.
             System.out.println("[KERNEL] No subscribers for: " + type);
         }
@@ -338,7 +341,7 @@ record PrefixRoute(String prefix, Connection conn) {}
 
 /**
  * CatalogEntry — one entry per capability declaration found in plugin.json.
- * Defined here (not inside PluginManager) so CapabilityIndex can reference it
+ * Defined here (not inside PluginManager) so CapabilityInterceptor can reference it
  * without coupling to PluginManager at all.
  */
 record CatalogEntry(
@@ -366,7 +369,7 @@ record CatalogEntry(
  * propagate and do NOT prevent subsequent interceptors or the broadcast from running.
  */
 interface EventInterceptor {
-    boolean intercept(Event event, String json) throws Exception;
+    boolean intercept(KernelEvent event, String json) throws Exception;
 }
 
 /**
@@ -379,15 +382,15 @@ interface EventInterceptor {
  */
 interface KernelBus {
     void sendTo(String pluginId, String json);
-    void route(Event event) throws Exception;
+    void route(KernelEvent event) throws Exception;
     void removePendingRoute(String corrId);
 }
 
 /**
- * PluginRuntime — contract between CapabilityIndex and PluginManager.
+ * PluginRuntime — contract between CapabilityInterceptor and PluginManager.
  *
  * Exposes catalog lookups (what exists on disk) and lifecycle operations
- * (spawn, track, list) through a single interface. CapabilityIndex depends
+ * (spawn, track, list) through a single interface. CapabilityInterceptor depends
  * only on this contract; PluginManager is never referenced directly.
  */
 interface PluginRuntime {
@@ -418,10 +421,10 @@ class KernelBusImpl implements KernelBus {
     }
 
     @Override
-    public void route(Event event) throws Exception {
+    public void route(KernelEvent event) throws Exception {
         // Re-serialise the event and push through the full routing pipeline.
         // KERNEL_SOURCE is used so pendingRoutes can record "kernel" as the sender.
-        String json = Event.MAPPER.writeValueAsString(event);
+        String json = KernelEvent.MAPPER.writeValueAsString(event);
         kernel.route(event, json, kernel.KERNEL_SOURCE);
     }
 

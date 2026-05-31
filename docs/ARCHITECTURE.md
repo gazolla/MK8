@@ -11,11 +11,11 @@ All primary microkernel classes reside inside the `kernel` directory, sharing a 
 ```
 kernel/
 ├── Kernel.java                 # UDS Server, connection manager, routing maps, core interfaces
-├── Event.java                  # Unified envelope, frame protocol, logging infrastructure
+├── KernelEvent.java                  # Unified envelope, frame protocol, logging infrastructure
 ├── PluginConfig.java           # plugin.json mapping (typed record accessors)
-├── BasePlugin.java             # Connection bootstrap, virtual thread dispatcher
+├── PluginBase.java             # Connection bootstrap, virtual thread dispatcher
 ├── PluginManager.java          # Plugin discovery, catalog, lifecycle (spawn, kill, track)
-├── CapabilityIndex.java        # Live registry, bid request broker, auction scheduler
+├── CapabilityInterceptor.java        # Live registry, bid request broker, auction scheduler
 └── IdempotencyInterceptor.java  # Deduplication cache, collapsing set manager
 ```
 
@@ -27,18 +27,18 @@ Decoupling between UDS infrastructure and extension logic is achieved via three 
 
 ### `EventInterceptor`
 Interceptors hook directly into the event bus pipeline inside `Kernel.route()`.
-- `boolean intercept(Event event, String json) throws Exception`
+- `boolean intercept(KernelEvent event, String json) throws Exception`
   - **Return `true`**: Consumes the event, halting the interceptor chain and skipping standard routing/broadcast.
   - **Return `false`**: Executes side-effects, allowing subsequent interceptors and standard routing to execute.
 
 ### `KernelBus`
 Provides a safe interface for interceptors to re-publish events into the bus or push frames directly to specific connections.
 - `void sendTo(String pluginId, String json)`: Delivers a payload directly to a client's write queue, bypassing routing.
-- `void route(Event event) throws Exception`: Serializes and pushes an event through the full Kernel routing pipeline.
+- `void route(KernelEvent event) throws Exception`: Serializes and pushes an event through the full Kernel routing pipeline.
 - `void removePendingRoute(String corrId)`: Removes a correlationId from the return-routing table. Used by `IdempotencyInterceptor` after it manually delivers a result, to prevent memory leaks in `pendingRoutes`.
 
 ### `PluginRuntime`
-The contract between `CapabilityIndex` and `PluginManager`. `CapabilityIndex` depends only on this interface — it never references `PluginManager` directly.
+The contract between `CapabilityInterceptor` and `PluginManager`. `CapabilityInterceptor` depends only on this interface — it never references `PluginManager` directly.
 
 ```java
 interface PluginRuntime {
@@ -68,15 +68,15 @@ The gateway server managing network sockets and connections.
   - `interceptors`: Immutable `List<EventInterceptor>` wired at boot: `[idempotency, capIdx]`.
   - `KERNEL_SOURCE`: Synthetic `Connection` used when the kernel re-enters its own routing pipeline (no writer thread started).
 - **Key Methods**:
-  - `main(String[] args)`: Boots the kernel, wires `PluginManager` + `CapabilityIndex`, starts the background scan, and runs the socket accept-loop.
+  - `main(String[] args)`: Boots the kernel, wires `PluginManager` + `CapabilityInterceptor`, starts the background scan, and runs the socket accept-loop.
   - `start()`: Binds the UDS socket, assembles the interceptor chain, and accepts connections.
-  - `route(Event event, String json, Connection source)`: Evaluates destinations based on event types, manages `pendingRoutes`, executes interceptors, and pushes frames.
+  - `route(KernelEvent event, String json, Connection source)`: Evaluates destinations based on event types, manages `pendingRoutes`, executes interceptors, and pushes frames.
   - `findProjectRoot()`: Resolves project root by searching parent directories for the `kernel` directory or a `Start.java` anchor.
 
-### `Event.java`
+### `KernelEvent.java`
 Defines the structure of messages, physical framing, and shared logging infrastructure.
 - **Key Records**:
-  - `Event`: Represents the event envelope record.
+  - `KernelEvent`: Represents the event envelope record.
 - **Key Methods**:
   - `readFrame(InputStream in)`: Reads a 4-byte header and parses the specified payload size from a UDS stream.
   - `writeFrame(OutputStream out, String json)`: Encapsulates a JSON payload into a length-prefixed frame.
@@ -85,11 +85,11 @@ Defines the structure of messages, physical framing, and shared logging infrastr
 ### `PluginConfig.java`
 Typed record wrapping the raw `JsonNode` parsed from `plugin.json`. Provides accessor methods for all config sections: root identity (`id`, `type`, `version`), `lifecycle`, `capabilities`, `launch`, `llm`, `agent`, and `thinking`. Loaded via `PluginConfig.load(path)`.
 
-### `BasePlugin.java`
+### `PluginBase.java`
 Removes repetitive client connection and registration boilerplate.
 - **Key Methods**:
   - `run(String configPath, String socketPath, EventHandler handler)`: Boots plugin connection, runs standard capacity registrations, and dispatches received events concurrently using virtual threads.
-  - `publish(Event event, OutputStream out)`: Stringifies and delivers an event through the connection stream.
+  - `publish(KernelEvent event, OutputStream out)`: Stringifies and delivers an event through the connection stream.
 
 ---
 
@@ -98,30 +98,30 @@ Removes repetitive client connection and registration boilerplate.
 The interceptor chain contains exactly two interceptors, executed in order for every `capability.invoke`:
 
 ```
-[IdempotencyInterceptor] → [CapabilityIndex]
+[IdempotencyInterceptor] → [CapabilityInterceptor]
 ```
 
-`PluginManager` is **not** an interceptor. It is a pure infrastructure service wired directly to `CapabilityIndex` via the `PluginRuntime` interface.
+`PluginManager` is **not** an interceptor. It is a pure infrastructure service wired directly to `CapabilityInterceptor` via the `PluginRuntime` interface.
 
 ### `IdempotencyInterceptor.java`
 Acts as the entry barrier for event deduplication and collapsing.
 - **Key Fields**:
-  - `cache`: Map storing `correlationId` to resolved `Event` outcomes.
+  - `cache`: Map storing `correlationId` to resolved `KernelEvent` outcomes.
   - `inFlight`: Map tracking `correlationId` to sets of waiting caller plugin IDs.
 - **Key Methods**:
-  - `intercept(Event event, String json)`: Directs `capability.invoke` to cache lookups or collapsing queues, and intercepts `capability.result` / `capability.error` to cache and manually distribute outputs.
+  - `intercept(KernelEvent event, String json)`: Directs `capability.invoke` to cache lookups or collapsing queues, and intercepts `capability.result` / `capability.error` to cache and manually distribute outputs.
 
-### `CapabilityIndex.java`
+### `CapabilityInterceptor.java`
 Maintains live capability provider state and manages auctions.
 - **Key Fields**:
   - `registrations`: Maps capability names to active `Registration` records (live providers only).
   - `pendingInvokes`: Queues `capability.invoke` events while on-demand providers are spawning.
   - `auctions`: Tracks in-flight `AuctionContext` objects by auction UUID.
 - **Key Methods**:
-  - `intercept(Event event, String json)`: Directs invoke queries, processes `capability.register` / `unregister` side-effects, and schedules auctions.
+  - `intercept(KernelEvent event, String json)`: Directs invoke queries, processes `capability.register` / `unregister` side-effects, and schedules auctions.
   - `setRuntime(PluginRuntime r)`: Wires the `PluginRuntime` implementation (called once at boot by `Kernel`).
-  - `handleInvoke(Event event)`: Routes to a live provider, falls back to catalog via `PluginRuntime` for persistent/on-demand plugins, or queues pending invokes and calls `runtime.spawnOnDemand()`.
-  - `startAuction(String capName, List<Registration> providers, Event invokeEvent)`: Broadcasts `capability.bid.request` and schedules resolution after **500ms**.
+  - `handleInvoke(KernelEvent event)`: Routes to a live provider, falls back to catalog via `PluginRuntime` for persistent/on-demand plugins, or queues pending invokes and calls `runtime.spawnOnDemand()`.
+  - `startAuction(String capName, List<Registration> providers, KernelEvent invokeEvent)`: Broadcasts `capability.bid.request` and schedules resolution after **500ms**.
   - `resolveAuction(String auctionId)`: Determines the winning provider (highest `score × (1 - load)`) and forwards the queued invocation.
 
 ---

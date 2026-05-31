@@ -14,11 +14,11 @@ For a conceptual deep dive into the system's core design patterns — such as ca
   * 📁 **`logs/`** — Auto-created on first run. Contains `start.log` (full run transcript), `kernel.log`, `summary-agent.log`, and `word-count.log`.
   * 📁 **`kernel/`** *(MicroKernel Core Infrastructure)*
     * 📄 **[Kernel.java](kernel/Kernel.java)** — UDS server, routing tables, interceptor chain wiring, and top-level records (`CatalogEntry`, `PrefixRoute`, `Connection`). Also defines the `EventInterceptor`, `KernelBus`, and `PluginRuntime` interfaces. *(See **[Core Kernel Architecture](docs/KERNEL.md)**)*
-    * 📄 **[Event.java](kernel/Event.java)** — JSON event envelope, 4-byte length-prefixed frame protocol, Jackson factory methods, and timestamp-prefixing logging. *(See **[Event Taxonomy Reference](docs/EVENTS.md)**)*
+    * 📄 **[KernelEvent.java](kernel/KernelEvent.java)** — JSON event envelope, 4-byte length-prefixed frame protocol, Jackson factory methods, and timestamp-prefixing logging. *(See **[KernelEvent Taxonomy Reference](docs/EVENTS.md)**)*
     * 📄 **[PluginConfig.java](kernel/PluginConfig.java)** — Typed accessors for `plugin.json` (id, lifecycle, capabilities, launch command, llm, agent, thinking blocks).
-    * 📄 **[BasePlugin.java](kernel/BasePlugin.java)** — Plugin bootstrap: UDS connect, `plugin.register` handshake, virtual-thread dispatcher, and auto-bidding. *(See **[BasePlugin Reference](docs/BASE_PLUGIN.md)**)*
+    * 📄 **[PluginBase.java](kernel/PluginBase.java)** — Plugin bootstrap: UDS connect, `plugin.register` handshake, virtual-thread dispatcher, and auto-bidding. *(See **[PluginBase Reference](docs/PLUGIN_BASE.md)**)*
     * 📄 **[PluginManager.java](kernel/PluginManager.java)** — Single source of truth for plugins: directory scan, catalog indexing, on-demand process spawn, idle-kill sweep. Implements `PluginRuntime`. *(See **[PluginManager Guide](docs/PLUGIN_MANAGER.md)**)*
-    * 📄 **[CapabilityIndex.java](kernel/CapabilityIndex.java)** — Live capability registry, bidding auction engine, built-in capability dispatcher. Depends only on `PluginRuntime` — zero reference to `PluginManager`. *(See **[CapabilityIndex Guide](docs/CAPABILITY_INDEX.md)**)*
+    * 📄 **[CapabilityInterceptor.java](kernel/CapabilityInterceptor.java)** — Live capability registry, bidding auction engine, built-in capability dispatcher. Depends only on `PluginRuntime` — zero reference to `PluginManager`. *(See **[CapabilityInterceptor Guide](docs/CAPABILITY_INTERCEPTOR.md)**)*
     * 📄 **[IdempotencyInterceptor.java](kernel/IdempotencyInterceptor.java)** — Single-Flight request collapsing and sliding-window result cache. *(See **[Idempotency & Collapsing Guide](docs/IDEMPOTENCY.md)**)*
   * 📁 **`system/`** *(Persistent Orchestrators)*
     * 📁 **`demo-runner/`** — Verification client: fires concurrent and sequential requests, validates collapsing and cache hits. *(See **[Pipeline Verification Demo](docs/VERIFICATION_DEMO.md)**)*
@@ -175,11 +175,11 @@ jbang DemoRunner.java
 * **[Core Kernel Architecture](docs/KERNEL.md):** UDS channel communications, length-prefixed binary framing, virtual-thread topology, and the interceptor chain pipeline.
 * **[System Concepts](docs/CONCEPTS.md):** Capability auctions, idempotency caching, Single-Flight request collapsing, persistent/on-demand lifecycles, and distributed tracing.
 * **[System Architecture & Class Reference](docs/ARCHITECTURE.md):** Class layout, interface specs (`EventInterceptor`, `KernelBus`, `PluginRuntime`), and method signatures.
-* **[Event Taxonomy Reference](docs/EVENTS.md):** Complete event catalog: `capability.*`, `system.plugin.*`, `message.*`, built-in capability names.
+* **[KernelEvent Taxonomy Reference](docs/EVENTS.md):** Complete event catalog: `capability.*`, `system.plugin.*`, `message.*`, built-in capability names.
 * **[PluginManager Guide](docs/PLUGIN_MANAGER.md):** Catalog scan, `CatalogEntry` record, on-demand process spawn, idle-kill sweep, and the `PluginRuntime` interface.
-* **[CapabilityIndex Guide](docs/CAPABILITY_INDEX.md):** Live registry, bidding auction engine, `handleInvoke` flow, and built-in handler dispatch map.
+* **[CapabilityInterceptor Guide](docs/CAPABILITY_INTERCEPTOR.md):** Live registry, bidding auction engine, `handleInvoke` flow, and built-in handler dispatch map.
 * **[Idempotency & Collapsing Guide](docs/IDEMPOTENCY.md):** Single-Flight collapsing implementation, sliding-window result cache, and memory-leak guards.
-* **[BasePlugin Reference](docs/BASE_PLUGIN.md):** Plugin bootstrap, `run()`, `publish()`, auto-bidding (`handleBidAuto`), and virtual-thread dispatch lifecycle.
+* **[PluginBase Reference](docs/PLUGIN_BASE.md):** Plugin bootstrap, `run()`, `publish()`, auto-bidding (`handleBidAuto`), and virtual-thread dispatch lifecycle.
 * **[Pipeline Verification Demo Guide](docs/VERIFICATION_DEMO.md):** Component roles, publisher/consumer event chain table, and sequence flowchart for the text analysis pipeline.
 * **[Creating a Plugin from Scratch](docs/CREATE_PLUGIN.md):** Step-by-step guide: `plugin.json`, instance pattern (`new Plugin().start()`), triggerEvent wiring, and pipeline integration.
 * **[Plugin Configuration Schemas](docs/PLUGIN_SCHEMAS.md):** Full `plugin.json` field reference for `system`, `tool`, and `agent` types; launch block; boot-order tiers.

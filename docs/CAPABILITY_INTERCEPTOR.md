@@ -1,22 +1,22 @@
-# CapabilityIndex Reference
+# CapabilityInterceptor Reference
 
-The `CapabilityIndex.java` class serves as the dynamic service registry and routing broker within the MK8 MicroKernel. It handles capabilities indexing, plugin provider registrations, dynamic bidding auctions, scoring evaluations, and route resolution.
+The `CapabilityInterceptor.java` class serves as the dynamic service registry and routing broker within the MK8 MicroKernel. It handles capabilities indexing, plugin provider registrations, dynamic bidding auctions, scoring evaluations, and route resolution.
 
 ---
 
 ## 1. Core Responsibilities
 
-The `CapabilityIndex` manages the following structural tasks:
+The `CapabilityInterceptor` manages the following structural tasks:
 1. **Dynamic Registration:** Intercepts `capability.register` events emitted by newly connected plugins and adds their declared capabilities to the active index.
 2. **Provider Tracking:** Keeps a thread-safe map of active capabilities and their registered providers, including parameters like `bidWeight` (bidding score) and tags.
-3. **Bidding Auctions Coordination:** When a client invokes a capability (e.g. `text.wordcount`), if the capability has multiple registered providers, the `CapabilityIndex` manages a real-time auction, soliciting scores from active candidates.
+3. **Bidding Auctions Coordination:** When a client invokes a capability (e.g. `text.wordcount`), if the capability has multiple registered providers, the `CapabilityInterceptor` manages a real-time auction, soliciting scores from active candidates.
 4. **Scoring & Route Selection:** Evaluates bid responses, selects the best provider based on weight scores and load, and caches the routing path.
 
 ---
 
 ## 2. Structural Design and Thread Safety
 
-`CapabilityIndex` is designed to be fully thread-safe, supporting concurrent registrations and lookups from high-performance virtual thread tasks:
+`CapabilityInterceptor` is designed to be fully thread-safe, supporting concurrent registrations and lookups from high-performance virtual thread tasks:
 
 * **`registrations` Map:** Maps `capabilityName` to a `CopyOnWriteArrayList<Registration>` of live providers. A `Registration` holds `pluginId`, `triggerEvent` (null for agents), and `bidWeight`.
 * **`pendingInvokes` Map:** Maps `capabilityName` to a list of queued `capability.invoke` events waiting for an on-demand plugin to start and register.
@@ -26,7 +26,7 @@ The `CapabilityIndex` manages the following structural tasks:
 
 ## 3. The Bidding and Auction Process
 
-The flow diagram below details how the `CapabilityIndex` coordinates a real-time capability auction:
+The flow diagram below details how the `CapabilityInterceptor` coordinates a real-time capability auction:
 
 ```
         Client Invokes Capability (e.g., "text.wordcount")
@@ -62,36 +62,36 @@ The flow diagram below details how the `CapabilityIndex` coordinates a real-time
 
 ### A. EventInterceptor Entry Point
 
-#### `boolean intercept(Event event, String json) throws Exception`
+#### `boolean intercept(KernelEvent event, String json) throws Exception`
 Routes to the appropriate handler based on `event.type()`. Returns `true` (consumed) for `capability.invoke`, `capability.unregister`, `capability.bid.response`, and `capability.query`. Returns `false` (side-effect only) for `capability.register`, `system.plugin.died/stopped`, and `plugin.installed`.
 
 ---
 
 ### B. Registration Management
 
-#### `void handleRegister(Event event)`
+#### `void handleRegister(KernelEvent event)`
 * **Description:** Adds a new `Registration` to `registrations` for the declared capability. After registration, drains any `pendingInvokes` queued while the plugin was starting.
 
-#### `void handleUnregister(Event event)`
+#### `void handleUnregister(KernelEvent event)`
 * **Description:** Removes the specific `Registration` for the given `pluginId` from the `registrations` map.
 
-#### `void handlePluginDied(Event event)`
+#### `void handlePluginDied(KernelEvent event)`
 * **Description:** Sweeps `registrations` and removes all entries whose `pluginId` matches the dead plugin.
 
 ---
 
 ### C. Routing and Auction Management
 
-#### `void handleInvoke(Event event)`
+#### `void handleInvoke(KernelEvent event)`
 * **Description:** Routes a `capability.invoke` to a live provider. If no live provider is found, consults the catalog via `PluginRuntime`: persistent plugins are re-routed via `triggerEvent`; on-demand plugins are queued in `pendingInvokes` and `runtime.spawnOnDemand(capName)` is called directly (no bus event).
 
 #### `void setRuntime(PluginRuntime r)`
-* **Description:** Wires the `PluginRuntime` implementation (called once at boot by `Kernel` after both `CapabilityIndex` and `PluginManager` are constructed). Until this is called, `runtime` is `null` and catalog fallbacks are skipped.
+* **Description:** Wires the `PluginRuntime` implementation (called once at boot by `Kernel` after both `CapabilityInterceptor` and `PluginManager` are constructed). Until this is called, `runtime` is `null` and catalog fallbacks are skipped.
 
-#### `void startAuction(String capName, List<Registration> providers, Event invokeEvent)`
+#### `void startAuction(String capName, List<Registration> providers, KernelEvent invokeEvent)`
 * **Description:** Creates an `AuctionContext`, broadcasts `capability.bid.request` to all candidates, and schedules `resolveAuction()` after a **500ms** window.
 
-#### `void handleBidResponse(Event event)`
+#### `void handleBidResponse(KernelEvent event)`
 * **Description:** Adds a `BidEntry` to the in-flight `AuctionContext`. If all candidates have voted, resolves the auction immediately (early exit).
 
 #### `void resolveAuction(String auctionId)`

@@ -5,31 +5,28 @@ import java.time.LocalDateTime;
 import java.util.*;
 import java.util.concurrent.*;
 import java.util.concurrent.atomic.AtomicBoolean;
-
 /**
- * CapabilityIndex — live capability registry and auction engine.
+ * CapabilityInterceptor — Live capability registry, routing broker, and auction engine.
  *
- * Interceptor return values:
- *   capability.invoke          → true  (consumed: routed directly, no broadcast)
- *   capability.register        → false (side-effect: save registration; broadcast continues)
- *   capability.unregister      → true  (only CapabilityIndex cares)
- *   capability.bid.response    → true  (internal auction step)
- *   capability.query           → true  (direct response to requester)
- *   system.plugin.died/stopped → false (clean up registrations; broadcast continues)
- *   plugin.installed           → false (refresh catalog; broadcast continues)
+ * Occupies position 1 in the Kernel's interceptor chain (executing after idempotency).
+ * It registers capabilities dynamically from plugins, maintaining a mapping of live
+ * providers. It routes capability invocations using a three-tier fallback scheme:
+ * 1. Single live provider: Direct peer-to-peer delivery or tool trigger routing.
+ * 2. Multiple live providers: Holds a 500ms auction using bidWeights and loads.
+ * 3. No live provider: Falls back to the PluginRuntime catalog to either queue
+ *    persistent plugins or spawn on-demand plugins and drain the queue on connect.
  *
- * Dependencies:
- *   KernelBus   — send events back into the bus (interface; no Kernel reference)
- *   PluginRuntime — catalog lookups + lifecycle (interface; no PluginManager reference)
- *   CatalogEntry  — standalone record in Kernel.java (no PluginManager reference)
+ * It also handles built-in capability requests such as "system.capability.list"
+ * and "system.plugin.list" locally in-process without routing to external plugins.
+ * Cleans up registrations automatically if "system.plugin.died" is received.
  */
-class CapabilityIndex implements EventInterceptor {
+class CapabilityInterceptor implements EventInterceptor {
 
     // ── Built-in capability handler (checked-exception-safe functional interface) ──
 
     @FunctionalInterface
     interface BuiltInHandler {
-        String handle(Event event) throws Exception;
+        String handle(KernelEvent event) throws Exception;
     }
 
     // ── Inner types ───────────────────────────────────────────────────────────
@@ -41,13 +38,13 @@ class CapabilityIndex implements EventInterceptor {
     }
 
     static class AuctionContext {
-        final Event              originalEvent;
+        final KernelEvent              originalEvent;
         final String             capabilityName;
         final List<Registration> candidates;
         final List<BidEntry>     bids     = Collections.synchronizedList(new ArrayList<>());
         private final AtomicBoolean resolved = new AtomicBoolean(false);
 
-        AuctionContext(Event originalEvent, String capabilityName, List<Registration> candidates) {
+        AuctionContext(KernelEvent originalEvent, String capabilityName, List<Registration> candidates) {
             this.originalEvent  = originalEvent;
             this.capabilityName = capabilityName;
             this.candidates     = List.copyOf(candidates);
@@ -73,7 +70,7 @@ class CapabilityIndex implements EventInterceptor {
     private final KernelBus                       bus;
     private final Map<String, BuiltInHandler>     builtins;       // registered at construction
     private final Map<String, List<Registration>> registrations  = new ConcurrentHashMap<>();
-    private final Map<String, List<Event>>        pendingInvokes = new ConcurrentHashMap<>();
+    private final Map<String, List<KernelEvent>>        pendingInvokes = new ConcurrentHashMap<>();
     private final Map<String, AuctionContext>      auctions       = new ConcurrentHashMap<>();
     private final ScheduledExecutorService scheduler =
             Executors.newScheduledThreadPool(1,
@@ -84,7 +81,7 @@ class CapabilityIndex implements EventInterceptor {
 
     // ── Construction ──────────────────────────────────────────────────────────
 
-    CapabilityIndex(KernelBus bus) {
+    CapabilityInterceptor(KernelBus bus) {
         this.bus = bus;
         // Built-in capability names handled in-process. Add new ones here without
         // touching handleInvoke.
@@ -99,7 +96,7 @@ class CapabilityIndex implements EventInterceptor {
     // ── EventInterceptor ──────────────────────────────────────────────────────
 
     @Override
-    public boolean intercept(Event event, String json) throws Exception {
+    public boolean intercept(KernelEvent event, String json) throws Exception {
         return switch (event.type()) {
             case "capability.invoke"            -> { handleInvoke(event);       yield true;  }
             case "capability.register"          -> { handleRegister(event);     yield false; }
@@ -115,8 +112,8 @@ class CapabilityIndex implements EventInterceptor {
 
     // ── Registration ──────────────────────────────────────────────────────────
 
-    void handleRegister(Event event) throws Exception {
-        JsonNode p        = Event.MAPPER.readTree(event.payload());
+    void handleRegister(KernelEvent event) throws Exception {
+        JsonNode p        = KernelEvent.MAPPER.readTree(event.payload());
         String   name     = p.path("name").asText(null);
         String   pluginId = p.path("pluginId").asText(null);
         if (name == null || pluginId == null) return;
@@ -132,18 +129,18 @@ class CapabilityIndex implements EventInterceptor {
                 + (trigger != null ? " trigger=" + trigger : " (agent)") + " weight=" + bidWeight);
 
         // Drain any invokes queued while this capability was starting on-demand
-        List<Event> pending = pendingInvokes.remove(name);
+        List<KernelEvent> pending = pendingInvokes.remove(name);
         if (pending != null && !pending.isEmpty()) {
             Registration reg = registrations.get(name).get(0);
             System.out.println("[CAP-IDX] Draining " + pending.size() + " queued invoke(s) for: " + name);
-            for (Event e : pending) {
+            for (KernelEvent e : pending) {
                 try { routeToProvider(reg, e); } catch (Exception ignored) {}
             }
         }
     }
 
-    void handleUnregister(Event event) throws Exception {
-        JsonNode p        = Event.MAPPER.readTree(event.payload());
+    void handleUnregister(KernelEvent event) throws Exception {
+        JsonNode p        = KernelEvent.MAPPER.readTree(event.payload());
         String   name     = p.path("name").asText(null);
         String   pluginId = p.path("pluginId").asText(null);
         if (name == null || pluginId == null) return;
@@ -153,7 +150,7 @@ class CapabilityIndex implements EventInterceptor {
 
     // ── Invoke routing ────────────────────────────────────────────────────────
 
-    void handleInvoke(Event event) throws Exception {
+    void handleInvoke(KernelEvent event) throws Exception {
         String capName = parseCapabilityName(event);
         if (capName == null) { publishError(event, "missing capability name"); return; }
 
@@ -173,19 +170,19 @@ class CapabilityIndex implements EventInterceptor {
         else                       startAuction(capName, new ArrayList<>(providers), event);
     }
 
-    private String parseCapabilityName(Event event) throws Exception {
-        String name = Event.MAPPER.readTree(event.payload()).path("name").asText(null);
+    private String parseCapabilityName(KernelEvent event) throws Exception {
+        String name = KernelEvent.MAPPER.readTree(event.payload()).path("name").asText(null);
         return (name != null && !name.isBlank()) ? name : null;
     }
 
-    private boolean handleBuiltIn(String capName, Event event) throws Exception {
+    private boolean handleBuiltIn(String capName, KernelEvent event) throws Exception {
         BuiltInHandler handler = builtins.get(capName);
         if (handler == null) return false;
         replyResult(event, handler.handle(event));
         return true;
     }
 
-    private void handleNoProvider(String capName, Event event) throws Exception {
+    private void handleNoProvider(String capName, KernelEvent event) throws Exception {
         if (runtime == null) { publishError(event, "no provider for: " + capName); return; }
         runtime.awaitReady(500);
         CatalogEntry entry = runtime.getByCapName(capName);
@@ -210,14 +207,14 @@ class CapabilityIndex implements EventInterceptor {
 
     // ── Auction ───────────────────────────────────────────────────────────────
 
-    void startAuction(String capName, List<Registration> providers, Event invokeEvent) throws Exception {
+    void startAuction(String capName, List<Registration> providers, KernelEvent invokeEvent) throws Exception {
         String auctionId = UUID.randomUUID().toString();
         auctions.put(auctionId, new AuctionContext(invokeEvent, capName, providers));
 
-        String bidReq = Event.MAPPER.writeValueAsString(Map.of(
+        String bidReq = KernelEvent.MAPPER.writeValueAsString(Map.of(
                 "capabilityName", capName,
                 "correlationId",  auctionId));
-        bus.route(Event.withCorrelation("capability.bid.request", bidReq, "kernel",
+        bus.route(KernelEvent.withCorrelation("capability.bid.request", bidReq, "kernel",
                 auctionId, invokeEvent.sessionId()));
 
         System.out.println("[CAP-IDX] Auction started for " + capName
@@ -225,9 +222,9 @@ class CapabilityIndex implements EventInterceptor {
         scheduler.schedule(() -> resolveAuction(auctionId), 500, TimeUnit.MILLISECONDS);
     }
 
-    void handleBidResponse(Event event) throws Exception {
-        JsonNode p     = Event.MAPPER.readTree(event.payload());
-        String   aucId = p.path("correlationId").asText(null);  // echoed by BasePlugin.handleBidAuto
+    void handleBidResponse(KernelEvent event) throws Exception {
+        JsonNode p     = KernelEvent.MAPPER.readTree(event.payload());
+        String   aucId = p.path("correlationId").asText(null);  // echoed by PluginBase.handleBidAuto
         if (aucId == null) return;
 
         AuctionContext ctx = auctions.get(aucId);
@@ -261,7 +258,7 @@ class CapabilityIndex implements EventInterceptor {
 
     // ── Routing helpers ───────────────────────────────────────────────────────
 
-    void routeToProvider(Registration reg, Event invokeEvent) throws Exception {
+    void routeToProvider(Registration reg, KernelEvent invokeEvent) throws Exception {
         // Tools have a triggerEvent; agents are reached via direct message routing.
         String type = reg.triggerEvent() != null ? reg.triggerEvent()
                                                  : "message." + reg.pluginId();
@@ -270,8 +267,8 @@ class CapabilityIndex implements EventInterceptor {
     }
 
     /** Creates a new event preserving the full correlation context but with a new type. */
-    private Event forwardAs(Event origin, String type) {
-        return new Event(UUID.randomUUID().toString(), type,
+    private KernelEvent forwardAs(KernelEvent origin, String type) {
+        return new KernelEvent(UUID.randomUUID().toString(), type,
                 origin.payload(), LocalDateTime.now(), "kernel",
                 origin.correlationId(), origin.sessionId(),
                 origin.workflowId(), null, origin.traceId(), origin.spanId());
@@ -308,13 +305,13 @@ class CapabilityIndex implements EventInterceptor {
             if (e.triggerEvent() != null) entry.put("triggerEvent", e.triggerEvent());
             caps.add(entry);
         }
-        return Event.MAPPER.writeValueAsString(caps);
+        return KernelEvent.MAPPER.writeValueAsString(caps);
     }
 
     // ── Plugin died/stopped ───────────────────────────────────────────────────
 
-    void handlePluginDied(Event event) throws Exception {
-        JsonNode p        = Event.MAPPER.readTree(event.payload());
+    void handlePluginDied(KernelEvent event) throws Exception {
+        JsonNode p        = KernelEvent.MAPPER.readTree(event.payload());
         // payload uses "pluginId" for tools/system; fall back to "agentId" for legacy agents
         String   pluginId = p.path("pluginId").asText(p.path("agentId").asText(null));
         if (pluginId == null || pluginId.isBlank()) return;
@@ -338,28 +335,28 @@ class CapabilityIndex implements EventInterceptor {
 
     // ── capability.query ──────────────────────────────────────────────────────
 
-    void handleQuery(Event event) throws Exception {
+    void handleQuery(KernelEvent event) throws Exception {
         String             capName = event.payload();
         List<Registration> ps      = registrations.getOrDefault(capName, List.of());
         List<String>       ids     = ps.stream().map(Registration::pluginId).toList();
-        String result = Event.MAPPER.writeValueAsString(
+        String result = KernelEvent.MAPPER.writeValueAsString(
                 Map.of("capability", capName, "providers", ids));
-        bus.route(Event.reply(event, "capability.query.result", result, "kernel"));
+        bus.route(KernelEvent.reply(event, "capability.query.result", result, "kernel"));
     }
 
     // ── Reply / Error helpers ─────────────────────────────────────────────────
 
     /** Wraps a JSON result string in {"result":…} and sends capability.result back to caller. */
-    private void replyResult(Event event, String resultJson) throws Exception {
-        String payload = Event.MAPPER.writeValueAsString(Map.of("result", resultJson));
-        bus.route(Event.withCorrelation("capability.result", payload,
+    private void replyResult(KernelEvent event, String resultJson) throws Exception {
+        String payload = KernelEvent.MAPPER.writeValueAsString(Map.of("result", resultJson));
+        bus.route(KernelEvent.withCorrelation("capability.result", payload,
                 "kernel", event.correlationId(), event.sessionId()));
     }
 
-    void publishError(Event origin, String reason) {
+    void publishError(KernelEvent origin, String reason) {
         try {
-            String payload = Event.MAPPER.writeValueAsString(Map.of("reason", reason));
-            bus.route(Event.withCorrelation("capability.error", payload,
+            String payload = KernelEvent.MAPPER.writeValueAsString(Map.of("reason", reason));
+            bus.route(KernelEvent.withCorrelation("capability.error", payload,
                     "kernel", origin.correlationId(), origin.sessionId()));
         } catch (Exception ignored) {}
     }

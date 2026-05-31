@@ -8,27 +8,24 @@ import java.util.concurrent.*;
 import java.util.stream.Stream;
 
 /**
- * PluginManager — single source of truth for plugin discovery and lifecycle.
+ * PluginManager — Plugin discovery, catalog indexing, and process lifecycle management.
  *
- * Merges what were previously PluginCatalog (disk scan, capability index) and
- * ProcessManager (process spawning, idle-kill, usage tracking) into one cohesive
- * infrastructure service.
+ * Combines static manifest scanning with dynamic process orchestration into a unified
+ * runtime engine implementing PluginRuntime. At boot, a virtual thread scans the
+ * project root for plugin.json files, building a capability catalog of all available
+ * services. It can dynamically hot-reload the catalog on plugin.installed events.
  *
- * Implements PluginRuntime — the contract used by CapabilityIndex to interact
- * with plugin infrastructure without depending on this class directly.
- *
- * Catalog:
- *   Scanned once at boot in a virtual thread (non-blocking).
- *   Refreshed synchronously on plugin.installed (small catalog, re-scan is fast).
- *
- * Lifecycle:
- *   On-demand plugins are spawned via spawnOnDemand() and killed by the
- *   60s idle-check sweeper calling terminatePlugin() directly — no bus events.
+ * Responsible for launching on-demand tools when an invoke event arrives without an
+ * active provider. Processes are run in individual directories, redirecting log
+ * streams to logs/<pluginId>.log. Spawning is protected by concurrency gates.
+ * Also keeps track of plugin usage timestamps and executes a background sweeper
+ * every 60 seconds to terminate on-demand processes that have exceeded their idle limit.
+ * Ensures full thread safety across concurrent readers and dynamic process mutations.
  */
 class PluginManager implements PluginRuntime {
 
     // ── Managed process ───────────────────────────────────────────────────────
-    // CatalogEntry is defined in Kernel.java (top-level record) so CapabilityIndex
+    // CatalogEntry is defined in Kernel.java (top-level record) so CapabilityInterceptor
     // can reference it without importing PluginManager.
 
     record ManagedProcess(String pluginId, long pid, Path pluginDir, Process process) {}
@@ -113,7 +110,7 @@ class PluginManager implements PluginRuntime {
         String pluginId  = entry.pluginId();
         Path   pluginDir = Path.of(entry.pluginDir());
 
-        // Already running — confirm to drain CapabilityIndex pendingInvokes
+        // Already running — confirm to drain CapabilityInterceptor pendingInvokes
         if (managed.containsKey(pluginId)) {
             System.out.println("[PLUGIN-MGR] Already running: " + pluginId
                     + " (spawn for " + capName + ")");
@@ -159,8 +156,8 @@ class PluginManager implements PluginRuntime {
                 System.out.println("[PLUGIN-MGR] Plugin died unexpectedly: "
                         + pluginId + " exitCode=" + exitCode);
                 try {
-                    bus.route(Event.of("system.plugin.died",
-                            Event.MAPPER.writeValueAsString(Map.of(
+                    bus.route(KernelEvent.of("system.plugin.died",
+                            KernelEvent.MAPPER.writeValueAsString(Map.of(
                                     "pluginId", pluginId,
                                     "pid",      pid,
                                     "exitCode", exitCode)),
@@ -188,7 +185,7 @@ class PluginManager implements PluginRuntime {
                             "lastUsed", idle);
                 })
                 .toList();
-        return Event.MAPPER.writeValueAsString(list);
+        return KernelEvent.MAPPER.writeValueAsString(list);
     }
 
     // ── Catalog scan ──────────────────────────────────────────────────────────
@@ -213,7 +210,7 @@ class PluginManager implements PluginRuntime {
 
             for (Path pf : pluginFiles) {
                 try {
-                    JsonNode json   = Event.MAPPER.readTree(pf.toFile());
+                    JsonNode json   = KernelEvent.MAPPER.readTree(pf.toFile());
                     String pluginId = json.path("id").asText("");
                     String type     = json.path("type").asText("");
                     if (pluginId.isBlank()) continue;
@@ -303,8 +300,8 @@ class PluginManager implements PluginRuntime {
 
         System.out.println("[PLUGIN-MGR] Stopped: " + pluginId
                 + " pid=" + mp.pid() + " reason=" + reason);
-        bus.route(Event.of("system.plugin.stopped",
-                Event.MAPPER.writeValueAsString(Map.of(
+        bus.route(KernelEvent.of("system.plugin.stopped",
+                KernelEvent.MAPPER.writeValueAsString(Map.of(
                         "pluginId", pluginId,
                         "pid",      mp.pid(),
                         "reason",   reason)),
@@ -313,8 +310,8 @@ class PluginManager implements PluginRuntime {
 
     private void publishSpawned(String pluginId, long pid, String capabilityName) {
         try {
-            bus.route(Event.of("system.plugin.spawned",
-                    Event.MAPPER.writeValueAsString(Map.of(
+            bus.route(KernelEvent.of("system.plugin.spawned",
+                    KernelEvent.MAPPER.writeValueAsString(Map.of(
                             "pluginId",   pluginId,
                             "pid",        pid,
                             "capability", capabilityName)),

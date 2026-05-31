@@ -47,7 +47,7 @@ To transmit JSON payloads over a continuous Unix Domain Socket (UDS) byte stream
 ```
 ┌───────────────────────────┬───────────────────────────────────────────┐
 │ Length Header (4 Bytes)   │ Payload Content (N Bytes)                 │
-│ Big-Endian 32-bit Integer │ UTF-8 Encoded JSON Event String           │
+│ Big-Endian 32-bit Integer │ UTF-8 Encoded JSON KernelEvent String           │
 └───────────────────────────┴───────────────────────────────────────────┘
 ```
 
@@ -56,7 +56,7 @@ To transmit JSON payloads over a continuous Unix Domain Socket (UDS) byte stream
 
 ---
 
-## 3. Event Envelope Structure
+## 3. KernelEvent Envelope Structure
 
 All data packets passing through the Kernel must conform to a standardized JSON schema. This envelope separates metadata routing properties from the raw application payload.
 
@@ -73,7 +73,7 @@ All data packets passing through the Kernel must conform to a standardized JSON 
 - `traceId` (string): Distributed tracing transactional identifier.
 - `spanId` (string): Distributed tracing execution step identifier.
 
-### Event Payload Example
+### KernelEvent Payload Example
 
 ```json
 {
@@ -110,14 +110,14 @@ The Kernel leverages Java Virtual Threads (JDK 21+) to achieve high concurrency 
 
 ---
 
-## 5. Event Interception Pipeline (Callbacks)
+## 5. KernelEvent Interception Pipeline (Callbacks)
 
 The MK8 Kernel-Extendido introduces a stateful interception pipeline. Interceptors are executed within `Kernel.route()` after logging the request but *before* matching subscriptions or executing broadcasts.
 
 ### Execution Chain Flow
 
 ```
-Incoming Event
+Incoming KernelEvent
      │
      ▼
  pendingRoutes Map Updated (For capability.invoke)
@@ -127,7 +127,7 @@ Incoming Event
      │
      ├──[Cache Hit / Collapsed] ──► [Direct Send to Callers] ──► (Halt Routing)
      ▼ [Cache Miss / In-Flight Init]
-[CapabilityIndex]
+[CapabilityInterceptor]
      │
      ├──[No Live Provider] ──────► [runtime.spawnOnDemand()] ──► (Halt Routing)
      ▼ [Active Provider Resolved]

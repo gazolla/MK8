@@ -4,23 +4,27 @@ import java.util.*;
 import java.util.concurrent.*;
 
 /**
- * IdempotencyInterceptor — platform-level idempotency and request collapsing.
+ * IdempotencyInterceptor — Platform-level request deduplication and Single-Flight collapsing.
  *
- * Intercepts capability.invoke and capability.result/error events.
- * Key features:
- *   1. Cache lookups: If correlationId has a cached result, returns it instantly.
- *   2. Request collapsing (Single-Flight): If correlationId is already in-flight,
- *      collapses duplicate calls, queuing the callers.
- *   3. Result distribution: On result arrival, delivers it to all collapsed callers
- *      and caches the result for CACHE_TTL_MINUTES minutes.
+ * Occupies position 0 in the Kernel's interceptor chain, running before capability checks.
+ * It eliminates redundant computation by implementing two caching and routing strategies:
+ * 1. Sliding-Window Cache: Stores results and errors for 5 minutes. Subsequent invokes
+ *    with the same correlationId are answered instantly from cache without routing.
+ * 2. Single-Flight Collapsing: If identical invokes arrive concurrently, only the first
+ *    is forwarded downstream. Duplicate callers are registered in-flight and then
+ *    answered simultaneously once the single downstream outcome is received.
+ *
+ * Employs atomic compute blocks on concurrent maps to prevent race conditions during
+ * simultaneous cache checks and result deliveries. Interceptor return values are used
+ * to consume events completely and avoid broadcast noise when cache hits occur.
  */
 class IdempotencyInterceptor implements EventInterceptor {
 
     private static final long CACHE_TTL_MINUTES = 5;
     private static final int  CORR_ID_LOG_LEN   = 8;
 
-    // correlationId → cached result/error Event
-    private final Map<String, Event>        cache    = new ConcurrentHashMap<>();
+    // correlationId → cached result/error KernelEvent
+    private final Map<String, KernelEvent>        cache    = new ConcurrentHashMap<>();
 
     // correlationId → list of pluginIds waiting for the result
     private final Map<String, List<String>> inFlight = new ConcurrentHashMap<>();
@@ -38,7 +42,7 @@ class IdempotencyInterceptor implements EventInterceptor {
     // ── EventInterceptor ──────────────────────────────────────────────────────
 
     @Override
-    public boolean intercept(Event event, String json) throws Exception {
+    public boolean intercept(KernelEvent event, String json) throws Exception {
         return switch (event.type()) {
             case "capability.invoke"                      -> handleInvoke(event, json);
             case "capability.result", "capability.error" -> handleResult(event, json);
@@ -48,16 +52,16 @@ class IdempotencyInterceptor implements EventInterceptor {
 
     // ── Invoke handling ───────────────────────────────────────────────────────
 
-    private boolean handleInvoke(Event event, String json) throws Exception {
+    private boolean handleInvoke(KernelEvent event, String json) throws Exception {
         String corrId = event.correlationId();
         if (corrId == null) return false; // can't enforce idempotency without correlationId
 
         // Case 1: Return cached result instantly (checked before acquiring inFlight lock)
-        Event cached = cache.get(corrId);
+        KernelEvent cached = cache.get(corrId);
         if (cached != null) {
             System.out.println("[IDEMPOTENCY] Cache hit for corrId=" + shortId(corrId)
                     + " → returning cached result to " + event.source());
-            bus.sendTo(event.source(), Event.MAPPER.writeValueAsString(cached));
+            bus.sendTo(event.source(), KernelEvent.MAPPER.writeValueAsString(cached));
             return true;
         }
 
@@ -69,11 +73,11 @@ class IdempotencyInterceptor implements EventInterceptor {
         boolean[] consumed = {false};
         inFlight.compute(corrId, (k, callers) -> {
             // Re-check cache inside the atomic compute block
-            Event recheck = cache.get(corrId);
+            KernelEvent recheck = cache.get(corrId);
             if (recheck != null) {
                 System.out.println("[IDEMPOTENCY] Cache hit (recheck) for corrId=" + shortId(corrId)
                         + " → returning cached result to " + event.source());
-                try { bus.sendTo(event.source(), Event.MAPPER.writeValueAsString(recheck)); }
+                try { bus.sendTo(event.source(), KernelEvent.MAPPER.writeValueAsString(recheck)); }
                 catch (Exception ignored) {}
                 consumed[0] = true;
                 return null; // do not create an inFlight entry
@@ -98,7 +102,7 @@ class IdempotencyInterceptor implements EventInterceptor {
 
     // ── Result / Error caching and delivery ──────────────────────────────────
 
-    private boolean handleResult(Event event, String json) throws Exception {
+    private boolean handleResult(KernelEvent event, String json) throws Exception {
         String corrId = event.correlationId();
         if (corrId == null) return false;
 

@@ -66,7 +66,7 @@ Create `tools/sentiment-analysis/plugin.json` containing:
 
 ## 3. Implementation: `SentimentAnalysisTool.java`
 
-Plugins use JBang to run without manual classpath configurations. They import the kernel's shared `Event.java` and `BasePlugin.java` files using JBang's `//SOURCES` directives.
+Plugins use JBang to run without manual classpath configurations. They import the kernel's shared `KernelEvent.java` and `PluginBase.java` files using JBang's `//SOURCES` directives.
 
 Create `tools/sentiment-analysis/SentimentAnalysisTool.java` containing:
 
@@ -75,8 +75,8 @@ Create `tools/sentiment-analysis/SentimentAnalysisTool.java` containing:
 //JAVA 21+
 //DEPS com.fasterxml.jackson.core:jackson-databind:2.17.2
 //DEPS com.fasterxml.jackson.datatype:jackson-datatype-jsr310:2.17.2
-//SOURCES ../../kernel/Event.java
-//SOURCES ../../kernel/BasePlugin.java
+//SOURCES ../../kernel/KernelEvent.java
+//SOURCES ../../kernel/PluginBase.java
 
 import com.fasterxml.jackson.databind.JsonNode;
 import java.io.OutputStream;
@@ -98,20 +98,20 @@ public class SentimentAnalysisTool {
     }
 
     void start() throws Exception {
-        // BasePlugin.run loads config, connects UDS, registers capability, and runs event loop
-        BasePlugin.run("plugin.json", Event.DEFAULT_SOCKET, this::handle);
+        // PluginBase.run loads config, connects UDS, registers capability, and runs event loop
+        PluginBase.run("plugin.json", KernelEvent.DEFAULT_SOCKET, this::handle);
     }
 
     void handle(String json, OutputStream out) throws Exception {
-        Event event = Event.MAPPER.readValue(json, Event.class);
+        KernelEvent event = KernelEvent.MAPPER.readValue(json, KernelEvent.class);
         if ("capability.tool.text.sentiment".equals(event.type())) {
             handleSentiment(event, out);
         }
     }
 
-    void handleSentiment(Event event, OutputStream out) throws Exception {
+    void handleSentiment(KernelEvent event, OutputStream out) throws Exception {
         // Parse incoming payload
-        JsonNode payload = Event.MAPPER.readTree(event.payload());
+        JsonNode payload = KernelEvent.MAPPER.readTree(event.payload());
         String text = payload.path("text").asText("");
         System.out.println("[SENTIMENT] Analyzing: " + text.length() + " chars");
 
@@ -119,13 +119,13 @@ public class SentimentAnalysisTool {
         String sentiment = calculateSentiment(text);
 
         // Package result
-        String resultPayload = Event.MAPPER.writeValueAsString(Map.of(
+        String resultPayload = KernelEvent.MAPPER.writeValueAsString(Map.of(
                 "result", sentiment
         ));
 
         // Reply to the kernel using the origin event's correlationId and reply routing
-        BasePlugin.publish(
-                Event.reply(event, "capability.result", resultPayload, "sentiment-analysis"),
+        PluginBase.publish(
+                KernelEvent.reply(event, "capability.result", resultPayload, "sentiment-analysis"),
                 out
         );
         System.out.println("[SENTIMENT] Done — sentiment=" + sentiment);
@@ -154,7 +154,7 @@ public class SentimentAnalysisTool {
 ```
 
 > [!NOTE]
-> To understand the detailed anatomy of event records, tracing scopes, and all standardized event namespaces (e.g., `capability.*`, `system.*`, `chat.*`), check the [Event Taxonomy Reference](EVENTS.md).
+> To understand the detailed anatomy of event records, tracing scopes, and all standardized event namespaces (e.g., `capability.*`, `system.*`, `chat.*`), check the [KernelEvent Taxonomy Reference](EVENTS.md).
 
 ---
 
@@ -198,7 +198,7 @@ Pipeline integration should be selected over monolithic function calls or tight 
 The sequence diagram below visualizes how the Kernel coordinates an asynchronous orchestration request. In this scenario, `DemoRunner` invokes a high-level `SummaryAgent`, which in turn triggers both `WordCountTool` and `SentimentAnalysisTool` concurrently, fanning their responses back into a unified report.
 
 ```
-DemoRunner              Kernel Event Bus            SummaryAgent       WordCountTool   SentimentAnalysisTool
+DemoRunner              Kernel KernelEvent Bus            SummaryAgent       WordCountTool   SentimentAnalysisTool
     │                           │                        │                  │                    │
     │  capability.invoke        │                        │                  │                    │
     │  (name="text.analyze")    │                        │                  │                    │
@@ -283,7 +283,7 @@ DemoRunner              Kernel Event Bus            SummaryAgent       WordCount
 When the MicroKernel starts up, `PluginManager` searches the directories listed in the workspace (such as `/tools` and `/system`). If it encounters a new plugin directory containing a `plugin.json` manifest:
 1. It parses the JSON schema.
 2. It indexes all listed capabilities in its internal catalog.
-3. It associates the dynamic trigger events (e.g. `capability.tool.text.sentiment`) with the process launch instructions. `CapabilityIndex` consults this catalog when routing invocations.
+3. It associates the dynamic trigger events (e.g. `capability.tool.text.sentiment`) with the process launch instructions. `CapabilityInterceptor` consults this catalog when routing invocations.
 
 #### 2. Declaring Dependencies and Scope
 To participate in the pipeline, orchestrator agents or callers must register to receive results or event replies. This is achieved by:

@@ -2,7 +2,7 @@
 
 `PluginManager.java` is the single source of truth for plugin discovery and lifecycle in MK8. It merges what were previously two separate classes — `PluginCatalog` (disk scan and capability index) and `ProcessManager` (process spawning, idle-kill, usage tracking) — into one cohesive infrastructure service.
 
-`PluginManager` implements `PluginRuntime`, the interface used by `CapabilityIndex` to interact with plugin infrastructure without coupling to this class directly.
+`PluginManager` implements `PluginRuntime`, the interface used by `CapabilityInterceptor` to interact with plugin infrastructure without coupling to this class directly.
 
 ---
 
@@ -10,10 +10,10 @@
 
 1. **Catalog Scan:** Walks the project directory tree at boot (in a virtual thread), reads every `plugin.json`, and populates in-memory lookup maps (`byCapName`, `byPluginId`).
 2. **Hot Refresh:** On `plugin.installed`, re-scans the directory tree synchronously (the catalog is small; a full re-scan is fast).
-3. **On-Demand Spawning:** Launches child processes via `ProcessBuilder` when `CapabilityIndex` calls `spawnOnDemand()`. Redirects stdout/stderr to `logs/<pluginId>.log`.
+3. **On-Demand Spawning:** Launches child processes via `ProcessBuilder` when `CapabilityInterceptor` calls `spawnOnDemand()`. Redirects stdout/stderr to `logs/<pluginId>.log`.
 4. **Idle-Kill:** A background scheduler checks every 60 seconds for on-demand plugins that have been idle longer than their declared `idleTimeoutSeconds` and terminates them.
 5. **Usage Tracking:** `trackUsage(capName)` updates the last-used timestamp so the idle-kill sweep knows a plugin is still active.
-6. **Plugin List:** `listPlugins()` returns a JSON array of running processes and their status (used by `CapabilityIndex` to handle `system.capability.list` invocations).
+6. **Plugin List:** `listPlugins()` returns a JSON array of running processes and their status (used by `CapabilityInterceptor` to handle `system.capability.list` invocations).
 
 ---
 
@@ -48,7 +48,7 @@ One entry per running child process.
 
 ## 3. PluginRuntime Interface
 
-`CapabilityIndex` only interacts with `PluginManager` through `PluginRuntime`. This keeps `CapabilityIndex` decoupled from the concrete infrastructure class.
+`CapabilityInterceptor` only interacts with `PluginManager` through `PluginRuntime`. This keeps `CapabilityInterceptor` decoupled from the concrete infrastructure class.
 
 ```java
 interface PluginRuntime {
@@ -91,14 +91,14 @@ Spawns the on-demand plugin that provides `capName`.
 
 1. Calls `awaitReady(500)` to ensure the catalog is ready.
 2. Looks up the `CatalogEntry`; returns immediately if the entry is missing or not `onDemand`.
-3. If the plugin is already in `managed`, publishes `system.plugin.spawned` and returns (idempotent — used to drain `pendingInvokes` in `CapabilityIndex`).
+3. If the plugin is already in `managed`, publishes `system.plugin.spawned` and returns (idempotent — used to drain `pendingInvokes` in `CapabilityInterceptor`).
 4. Guards against double-spawn using the `spawning` set.
 5. Builds `ProcessBuilder` from `entry.launchCommand()`, sets the working directory to `pluginDir`, and redirects both stdout and stderr to `logs/<pluginId>.log`.
 6. Stores the `ManagedProcess` in `managed`, updates `lastUsed`, and publishes `system.plugin.spawned`.
 7. Registers a `process.onExit()` callback that publishes `system.plugin.died` if the process exits unexpectedly.
 
 #### `void trackUsage(String capName)`
-Updates the `lastUsed` timestamp for the plugin that provides `capName`. Called by `CapabilityIndex.handleInvoke()` after routing a request to an already-running plugin.
+Updates the `lastUsed` timestamp for the plugin that provides `capName`. Called by `CapabilityInterceptor.handleInvoke()` after routing a request to an already-running plugin.
 
 #### `String listPlugins()`
 Returns a JSON array of maps, one per managed process, with fields:
@@ -127,13 +127,13 @@ var pluginMgr = new PluginManager(bus, mk8Root);
 Thread.ofVirtual().start(pluginMgr::scan);   // non-blocking background scan
 
 var idempotency = new IdempotencyInterceptor(bus);
-var capIdx      = new CapabilityIndex(bus);
+var capIdx      = new CapabilityInterceptor(bus);
 capIdx.setRuntime(pluginMgr);                // inject PluginRuntime
 
 interceptors = List.of(idempotency, capIdx); // immutable after this point
 ```
 
-`PluginManager` is **not** part of the interceptor chain. It is a pure infrastructure service — `CapabilityIndex` calls it directly through the `PluginRuntime` interface.
+`PluginManager` is **not** part of the interceptor chain. It is a pure infrastructure service — `CapabilityInterceptor` calls it directly through the `PluginRuntime` interface.
 
 ---
 

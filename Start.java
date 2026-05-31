@@ -7,17 +7,19 @@ import java.util.*;
 import java.util.concurrent.TimeUnit;
 
 /**
- * Start — single-entry bootrunner for the MK8 verification demo.
+ * Start — Single-entry boot runner and orchestrator for the MK8 verification demo.
  *
- * Spawns Kernel and SummaryAgent in the background, waits for the UDS socket,
- * runs DemoRunner in the foreground, and tears down all child processes on exit.
+ * This class serves as the central launcher for the microkernel environment.
+ * It spawns the core Kernel and the persistent SummaryAgent as background processes,
+ * waits for the Unix Domain Socket (UDS) to initialize, and executes DemoRunner
+ * in the foreground to run integration checks. When the run finishes or is terminated,
+ * a shutdown hook ensures all background child processes are terminated cleanly.
  *
- * Logging strategy:
- *   logs/kernel.log        — Kernel stdout/stderr (truncated on each run)
- *   logs/summary-agent.log — SummaryAgent stdout/stderr (truncated on each run)
- *   logs/word-count.log    — WordCountTool stdout/stderr (appended by PluginManager)
- *   logs/start.log         — Everything printed by Start itself + DemoRunner output
- *                            (truncated on each run; mirrors the terminal exactly)
+ * It implements a dual-stream redirection (TeeOutputStream) that logs system output
+ * to both the terminal and "logs/start.log" in real time. Individual component logs
+ * are written separately to the "logs/" folder:
+ * - logs/kernel.log: Redirected stdout and stderr from the Kernel process.
+ * - logs/summary-agent.log: Redirected output from the SummaryAgent process.
  */
 public class Start {
 

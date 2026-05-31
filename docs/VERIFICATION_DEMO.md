@@ -72,11 +72,11 @@ The demo orchestrates three main actors alongside the Kernel core. Below is the 
 
 ---
 
-## 3. The Publisher/Consumer Event Chain
+## 3. The Publisher/Consumer KernelEvent Chain
 
 The table below maps the complete step-by-step transaction life cycle as events traverse the Kernel's virtual thread routing engine:
 
-| Step | Publisher (Source) | Event Type (`type`) | Key Payload Properties | Consumer (Destination) | Tracing Scope (`correlationId` / `sessionId`) |
+| Step | Publisher (Source) | KernelEvent Type (`type`) | Key Payload Properties | Consumer (Destination) | Tracing Scope (`correlationId` / `sessionId`) |
 | :--- | :--- | :--- | :--- | :--- | :--- |
 | **1** | `DemoRunner` | `capability.invoke` | `name: "text.analyze"`, `text: "..."` | `Kernel` (Bus) | `corrId: "corr-demo-1"`, `sessId: "session-xyz"` |
 | **2** | `Kernel` (Bus) | `message.summary-agent` | `text: "..."` | `SummaryAgent` | `corrId: "corr-demo-1"`, `sessId: "session-xyz"` |

@@ -16,14 +16,21 @@ import java.time.format.DateTimeFormatter;
 import java.util.UUID;
 
 /**
- * Event transport and shared kernel infrastructure (frame protocol, UDS boot, logging).
+ * KernelEvent — Immutable event envelope and transport infra for the MK8 bus.
  *
- * Plugin configuration schema (PluginConfig + nested records) lives in BasePlugin.java.
+ * Every message exchanged across the Unix Domain Socket (UDS) in MK8 is structured
+ * as a KernelEvent record. It carries standard routing metadata (id, type, source,
+ * correlationId, sessionId, traceId, spanId) and an opaque JSON payload string.
  *
- * Frame protocol: 4 bytes big-endian length + UTF-8 JSON payload.
- * All plugins use readFrame/writeFrame — never raw readline.
+ * To guarantee message boundaries over TCP/UDS socket streams, the transport layer
+ * prefixes each serialized JSON block with a 4-byte big-endian length integer.
+ * Helper methods readFrame and writeFrame execute this framing protocol safely.
+ * Static factories simplify building common patterns like direct requests, sessions,
+ * trace context transmission, and replies. Also redirects standard stdout and
+ * stderr streams to prepend microsecond timestamps for unified kernel logging.
+ * The default socket path (/tmp/mk8/kernel.sock) can be configured at boot time.
  */
-public record Event(
+public record KernelEvent(
         String id,
         String type,
         String payload,
@@ -62,7 +69,7 @@ public record Event(
      *
      * Plugins should call this explicitly at the top of main() instead of relying
      * on the static initializer ordering (which varies by JVM class-loading sequence):
-     *   {@code Event.initLogging();}
+     *   {@code KernelEvent.initLogging();}
      */
     public static void initLogging() {
         if (System.getProperty(LOGGING_FLAG) == null) {
@@ -119,31 +126,31 @@ public record Event(
 
     // ── Factory methods ───────────────────────────────────────────────────────
 
-    public static Event of(String type, String payload, String source) {
+    public static KernelEvent of(String type, String payload, String source) {
         String[] t = currentTrace();
-        return new Event(uuid(), type, payload, now(), source, null, null, null, null, t[0], t[1]);
+        return new KernelEvent(uuid(), type, payload, now(), source, null, null, null, null, t[0], t[1]);
     }
 
-    public static Event withSession(String type, String payload, String source, String sessionId) {
+    public static KernelEvent withSession(String type, String payload, String source, String sessionId) {
         String[] t = currentTrace();
         if (t[0] == null) { t[0] = uuid(); t[1] = t[0]; }
-        return new Event(uuid(), type, payload, now(), source, null, sessionId, null, null, t[0], t[1]);
+        return new KernelEvent(uuid(), type, payload, now(), source, null, sessionId, null, null, t[0], t[1]);
     }
 
-    public static Event withCorrelation(String type, String payload, String source,
+    public static KernelEvent withCorrelation(String type, String payload, String source,
                                         String correlationId, String sessionId) {
         String[] t = currentTrace();
-        return new Event(uuid(), type, payload, now(), source, correlationId, sessionId, null, null, t[0], t[1]);
+        return new KernelEvent(uuid(), type, payload, now(), source, correlationId, sessionId, null, null, t[0], t[1]);
     }
 
-    public static Event withTrace(String type, String payload, String source,
+    public static KernelEvent withTrace(String type, String payload, String source,
                                   String correlationId, String sessionId,
                                   String traceId, String spanId) {
-        return new Event(uuid(), type, payload, now(), source, correlationId, sessionId, null, null, traceId, spanId);
+        return new KernelEvent(uuid(), type, payload, now(), source, correlationId, sessionId, null, null, traceId, spanId);
     }
 
-    public static Event reply(Event origin, String type, String payload, String source) {
-        return new Event(uuid(), type, payload, now(), source,
+    public static KernelEvent reply(KernelEvent origin, String type, String payload, String source) {
+        return new KernelEvent(uuid(), type, payload, now(), source,
                 origin.correlationId(), origin.sessionId(), origin.workflowId(),
                 null, origin.traceId(), origin.spanId());
     }

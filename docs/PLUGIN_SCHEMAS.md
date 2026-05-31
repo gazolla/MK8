@@ -69,7 +69,7 @@ System plugins contain no `llm`, `agent`, or `capabilities` blocks.
 
 Tool plugins contain no `llm` or `agent` blocks. They contain a `capabilities` block defining `inputSchema` and `outputSchema`.
 
-The lifecycle mode is always `on-demand` accompanied by `idleTimeoutSeconds`. **Tools are not started at boot**. Instead, `PluginManager` spawns them on-demand when `CapabilityIndex` calls `runtime.spawnOnDemand()` on the first invocation. A tool must subscribe directly to its own capability `triggerEvent`.
+The lifecycle mode is always `on-demand` accompanied by `idleTimeoutSeconds`. **Tools are not started at boot**. Instead, `PluginManager` spawns them on-demand when `CapabilityInterceptor` calls `runtime.spawnOnDemand()` on the first invocation. A tool must subscribe directly to its own capability `triggerEvent`.
 
 ```json
 {
@@ -120,7 +120,7 @@ The lifecycle mode is always `on-demand` accompanied by `idleTimeoutSeconds`. **
 }
 ```
 
-**Tool Routing Rule**: `CapabilityIndex` (or `CapabilityIndex`) receives a `capability.invoke { name: "tool.filesystem.op" }` event, resolves the associated `triggerEvent`, and re-publishes it as `capability.tool.filesystem.op`. The target tool subscribes to this `triggerEvent` directly rather than to the generic `capability.invoke`.
+**Tool Routing Rule**: `CapabilityInterceptor` (or `CapabilityInterceptor`) receives a `capability.invoke { name: "tool.filesystem.op" }` event, resolves the associated `triggerEvent`, and re-publishes it as `capability.tool.filesystem.op`. The target tool subscribes to this `triggerEvent` directly rather than to the generic `capability.invoke`.
 
 ### Implemented Operations: `tool.filesystem.op`
 
@@ -323,7 +323,7 @@ Appears only in user-facing agents (e.g., `assistant`). Defines the status messa
 | `outputSchema` | object | JSON Schema defining output structures |
 | `exclusive` | boolean | `true` restricts the capability to a single provider |
 | `bidWeight` | number | Base bidding score factor (0.0 to 1.0) |
-| `tags` | string[] | Meta tags for semantic search routing in `CapabilityIndex` |
+| `tags` | string[] | Meta tags for semantic search routing in `CapabilityInterceptor` |
 
 ---
 
@@ -382,7 +382,7 @@ For agents sharing `Agent.java`:
 
 | Type | `triggerEvent` | Delivery Flow |
 |---|---|---|
-| tool | `capability.tool.<name>` | `CapabilityIndex` intercepts generic invokes, re-publishes to exact triggerEvent type; tool receives direct UDS frames |
-| agent | *(None)* | `CapabilityIndex` evaluates candidate bids, resolves, and forwards to target agent via `message.{agentId}` |
+| tool | `capability.tool.<name>` | `CapabilityInterceptor` intercepts generic invokes, re-publishes to exact triggerEvent type; tool receives direct UDS frames |
+| agent | *(None)* | `CapabilityInterceptor` evaluates candidate bids, resolves, and forwards to target agent via `message.{agentId}` |
 
 Agents **do not subscribe to `capability.invoke`**. They receive UDS messages strictly on `message.{self}` paths configured by the Kernel during initialization.

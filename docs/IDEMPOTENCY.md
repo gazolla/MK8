@@ -22,7 +22,7 @@ When a client sends duplicate sequential requests within a short timeframe, reca
 
 The interceptor operates under intense, concurrent virtual thread execution. To prevent race conditions and memory leaks, it employs several specialized concurrency patterns:
 
-* **`cache` Map:** A thread-safe `ConcurrentHashMap` mapping a `correlationId` to the cached `Event` payload.
+* **`cache` Map:** A thread-safe `ConcurrentHashMap` mapping a `correlationId` to the cached `KernelEvent` payload.
 * **`inFlight` Map:** A `ConcurrentHashMap` mapping a `correlationId` to a thread-safe `CopyOnWriteArrayList<String>` containing the list of waiting caller plugin IDs.
 * **`scheduler` Engine:** A daemon thread `ScheduledExecutorService` that automatically runs cleanups, evicting cached items after their 5-minute sliding-window TTL expires.
 * **Atomic Cache+InFlight Decision:** The cache-hit check and the in-flight registration/collapsing decision are made atomically inside a single `ConcurrentHashMap.compute()` call. This closes the race window where `handleResult()` could transition `inFlight → cache` between the initial cache check and the subsequent in-flight lookup, which would otherwise allow a duplicate invoke to bypass both guards and reach the downstream provider.
@@ -34,7 +34,7 @@ The interceptor operates under intense, concurrent virtual thread execution. To 
 The sequence flowchart below illustrates how the interceptor handles incoming `capability.invoke` requests:
 
 ```
-                  Incoming "capability.invoke" Event
+                  Incoming "capability.invoke" KernelEvent
                                   │
                                   ▼
                     [Extract correlationId String]
@@ -76,10 +76,10 @@ The sequence flowchart below illustrates how the interceptor handles incoming `c
 
 ### A. Core Interceptor Contract
 
-#### `public boolean intercept(Event event, String json) throws Exception`
+#### `public boolean intercept(KernelEvent event, String json) throws Exception`
 * **Description:** Implements the `EventInterceptor` interface. Receives all events from the core routing engine right before the broadcast phase.
 * **Arguments:**
-  * `event`: The parsed `Event` record.
+  * `event`: The parsed `KernelEvent` record.
   * `json`: The raw serialized JSON frame.
 * **Returns:** `true` if the event was fully resolved and consumed by the interceptor (halting subsequent routing), or `false` to let normal routing proceed.
 
@@ -87,8 +87,8 @@ The sequence flowchart below illustrates how the interceptor handles incoming `c
 
 ### B. Internal Workload Processing
 
-#### `private boolean handleInvoke(Event event, String json) throws Exception`
+#### `private boolean handleInvoke(KernelEvent event, String json) throws Exception`
 * **Description:** Manages cache hit evaluations and registers concurrent callers for Single-Flight collapsing. The cache-miss path and in-flight registration are resolved atomically inside a single `inFlight.compute()` call; a re-check of the cache inside `compute()` closes the race window between the initial cache lookup and the in-flight decision.
 
-#### `private boolean handleResult(Event event, String json) throws Exception`
+#### `private boolean handleResult(KernelEvent event, String json) throws Exception`
 * **Description:** Manages the arrival of computed results, caches the payloads, starts the 5-minute eviction scheduler, delivers the response to all registered callers, and calls `bus.removePendingRoute(corrId)` to clean up the return-routing table and prevent memory leaks.

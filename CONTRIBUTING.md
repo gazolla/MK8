@@ -26,7 +26,7 @@ MK8 thrives on its decoupled, dynamic plugin architecture. You can contribute ne
 You can contribute directly to the core kernel logic inside the `kernel/` folder:
 - **Interceptors:** Enhancing or writing new implementations of `EventInterceptor` (like security token validation or compression filters).
 - **Performance Optimizations:** Tuning UDS length-prefixed frame parsers or improving the concurrency throughput of Virtual Thread writers.
-- **Routing Rules:** Optimizing bidding auctions (`CapabilityIndex`), route caching, or idle sweepers (`ProcessManager`).
+- **Routing Rules:** Optimizing bidding auctions (`CapabilityInterceptor`), route caching, or idle sweepers (`ProcessManager`).
 
 ### 4. Code Submission Flow
 1. Fork the repository.
