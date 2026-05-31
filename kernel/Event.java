@@ -3,25 +3,22 @@
 
 import com.fasterxml.jackson.annotation.JsonInclude;
 import com.fasterxml.jackson.databind.DeserializationFeature;
-import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.SerializationFeature;
 import com.fasterxml.jackson.datatype.jsr310.JavaTimeModule;
 import java.io.IOException;
 import java.io.InputStream;
 import java.io.OutputStream;
-import java.net.UnixDomainSocketAddress;
-import java.nio.channels.Channels;
-import java.nio.channels.SocketChannel;
+import java.io.PrintStream;
 import java.nio.charset.StandardCharsets;
-import java.nio.file.Files;
-import java.nio.file.Path;
 import java.time.LocalDateTime;
-import java.util.List;
+import java.time.format.DateTimeFormatter;
 import java.util.UUID;
 
 /**
- * Unified system event and shared infrastructure (frame protocol, plugin config, UDS boot).
+ * Event transport and shared kernel infrastructure (frame protocol, UDS boot, logging).
+ *
+ * Plugin configuration schema (PluginConfig + nested records) lives in BasePlugin.java.
  *
  * Frame protocol: 4 bytes big-endian length + UTF-8 JSON payload.
  * All plugins use readFrame/writeFrame — never raw readline.
@@ -46,10 +43,14 @@ public record Event(
             .configure(DeserializationFeature.FAIL_ON_UNKNOWN_PROPERTIES, false)
             .setSerializationInclusion(JsonInclude.Include.NON_NULL);
 
-    public static final String DEFAULT_SOCKET = "/tmp/mk7/kernel.sock";
+    /** Override at runtime with -Dmk8.socket=/path/to/kernel.sock */
+    public static final String DEFAULT_SOCKET =
+            System.getProperty("mk8.socket", "/tmp/mk8/kernel.sock");
 
     public static final ThreadLocal<String> CURRENT_TRACE_ID = new ThreadLocal<>();
-    public static final ThreadLocal<String> CURRENT_SPAN_ID = new ThreadLocal<>();
+    public static final ThreadLocal<String> CURRENT_SPAN_ID  = new ThreadLocal<>();
+
+    private static final String LOGGING_FLAG = "mk8.logging.redirected";
 
     static {
         initLogging();
@@ -64,38 +65,29 @@ public record Event(
      *   {@code Event.initLogging();}
      */
     public static void initLogging() {
-        if (System.getProperty("mk8.logging.redirected") == null) {
-            System.setProperty("mk8.logging.redirected", "true");
+        if (System.getProperty(LOGGING_FLAG) == null) {
+            System.setProperty(LOGGING_FLAG, "true");
             System.setOut(new TimestampPrintStream(System.out));
             System.setErr(new TimestampPrintStream(System.err));
         }
     }
 
-    public static class TimestampPrintStream extends java.io.PrintStream {
-        private final java.io.PrintStream original;
-        private final java.time.format.DateTimeFormatter formatter = 
-            java.time.format.DateTimeFormatter.ofPattern("yyyy-MM-dd HH:mm:ss.SSS");
+    public static class TimestampPrintStream extends PrintStream {
+        private final PrintStream       original;
+        private final DateTimeFormatter formatter =
+                DateTimeFormatter.ofPattern("yyyy-MM-dd HH:mm:ss.SSS");
         private boolean atLineStart = true;
 
-        public TimestampPrintStream(java.io.PrintStream original) {
+        public TimestampPrintStream(PrintStream original) {
             super(original);
             this.original = original;
         }
 
         @Override
         public void write(int b) {
-            if (atLineStart) {
-                String prefix = "[" + java.time.LocalDateTime.now().format(formatter) + "] ";
-                byte[] prefixBytes = prefix.getBytes(java.nio.charset.StandardCharsets.UTF_8);
-                try {
-                    original.write(prefixBytes);
-                } catch (java.io.IOException ignored) {}
-                atLineStart = false;
-            }
+            if (atLineStart) writePrefix();
             original.write(b);
-            if (b == '\n') {
-                atLineStart = true;
-            }
+            if (b == '\n') atLineStart = true;
         }
 
         @Override
@@ -103,66 +95,63 @@ public record Event(
             int start = off;
             for (int i = 0; i < len; i++) {
                 if (buf[off + i] == '\n') {
-                    int segmentLen = (off + i + 1) - start;
-                    writeSegment(buf, start, segmentLen);
+                    writeSegment(buf, start, (off + i + 1) - start);
                     atLineStart = true;
                     start = off + i + 1;
                 }
             }
-            if (start < off + len) {
-                writeSegment(buf, start, (off + len) - start);
-            }
+            if (start < off + len) writeSegment(buf, start, (off + len) - start);
         }
 
         private void writeSegment(byte[] buf, int off, int len) {
             if (len <= 0) return;
-            if (atLineStart) {
-                String prefix = "[" + java.time.LocalDateTime.now().format(formatter) + "] ";
-                byte[] prefixBytes = prefix.getBytes(java.nio.charset.StandardCharsets.UTF_8);
-                try {
-                    original.write(prefixBytes);
-                } catch (java.io.IOException ignored) {}
-                atLineStart = false;
-            }
+            if (atLineStart) writePrefix();
             original.write(buf, off, len);
+        }
+
+        private void writePrefix() {
+            byte[] bytes = ("[" + LocalDateTime.now().format(formatter) + "] ")
+                    .getBytes(StandardCharsets.UTF_8);
+            try { original.write(bytes); } catch (IOException ignored) {}
+            atLineStart = false;
         }
     }
 
     // ── Factory methods ───────────────────────────────────────────────────────
 
     public static Event of(String type, String payload, String source) {
-        String tid = CURRENT_TRACE_ID.get();
-        String sid = CURRENT_SPAN_ID.get();
-        return new Event(uuid(), type, payload, now(), source, null, null, null, null, tid, sid);
+        String[] t = currentTrace();
+        return new Event(uuid(), type, payload, now(), source, null, null, null, null, t[0], t[1]);
     }
 
     public static Event withSession(String type, String payload, String source, String sessionId) {
-        String tid = CURRENT_TRACE_ID.get();
-        String sid = CURRENT_SPAN_ID.get();
-        if (tid == null) {
-            tid = uuid();
-            sid = tid;
-        }
-        return new Event(uuid(), type, payload, now(), source, null, sessionId, null, null, tid, sid);
+        String[] t = currentTrace();
+        if (t[0] == null) { t[0] = uuid(); t[1] = t[0]; }
+        return new Event(uuid(), type, payload, now(), source, null, sessionId, null, null, t[0], t[1]);
     }
 
-    public static Event withCorrelation(String type, String payload, String source, String correlationId, String sessionId) {
-        String tid = CURRENT_TRACE_ID.get();
-        String sid = CURRENT_SPAN_ID.get();
-        return new Event(uuid(), type, payload, now(), source, correlationId, sessionId, null, null, tid, sid);
+    public static Event withCorrelation(String type, String payload, String source,
+                                        String correlationId, String sessionId) {
+        String[] t = currentTrace();
+        return new Event(uuid(), type, payload, now(), source, correlationId, sessionId, null, null, t[0], t[1]);
     }
 
-    public static Event withTrace(String type, String payload, String source, String correlationId, String sessionId, String traceId, String spanId) {
+    public static Event withTrace(String type, String payload, String source,
+                                  String correlationId, String sessionId,
+                                  String traceId, String spanId) {
         return new Event(uuid(), type, payload, now(), source, correlationId, sessionId, null, null, traceId, spanId);
     }
 
     public static Event reply(Event origin, String type, String payload, String source) {
         return new Event(uuid(), type, payload, now(), source,
-                origin.correlationId(), origin.sessionId(), origin.workflowId(), null, origin.traceId(), origin.spanId());
+                origin.correlationId(), origin.sessionId(), origin.workflowId(),
+                null, origin.traceId(), origin.spanId());
     }
 
-    private static String uuid() { return UUID.randomUUID().toString(); }
-    private static LocalDateTime now() { return LocalDateTime.now(); }
+    /** Returns [traceId, spanId] from the current thread context. */
+    private static String[]      currentTrace() { return new String[]{ CURRENT_TRACE_ID.get(), CURRENT_SPAN_ID.get() }; }
+    private static String        uuid()         { return UUID.randomUUID().toString(); }
+    private static LocalDateTime now()          { return LocalDateTime.now(); }
 
     // ── Frame protocol ────────────────────────────────────────────────────────
 
@@ -188,162 +177,4 @@ public record Event(
         out.flush();
     }
 
-    // ── Plugin config ─────────────────────────────────────────────────────────
-
-    public record LaunchConfig(
-            String name,
-            String[] command,
-            Integer order,
-            Integer delayAfterMs,
-            Boolean interactive,
-            String prebuild
-    ) {}
-
-    public record PluginConfig(
-            String id,
-            String type,           // "system" | "tool" | "agent"
-            String version,
-            String description,
-            LifecycleConfig lifecycle,
-            LlmConfig llm,
-            AgentConfig agent,
-            ThinkingConfig thinking,
-            LaunchConfig launch,
-            List<CapabilityDecl> capabilities,
-            List<String> subscribes,
-            List<String> wildcardSubscribes,
-            List<String> publishes
-    ) {
-        public List<String> subscribesOrEmpty() {
-            return subscribes != null ? subscribes : List.of();
-        }
-        public List<String> wildcardSubscribesOrEmpty() {
-            return wildcardSubscribes != null ? wildcardSubscribes : List.of();
-        }
-        public List<CapabilityDecl> capabilitiesOrEmpty() {
-            return capabilities != null ? capabilities : List.of();
-        }
-    }
-
-    public record LifecycleConfig(String mode, Integer idleTimeoutSeconds) {
-        public String modeOrDefault() { return mode != null ? mode : "persistent"; }
-        public int idleTimeoutOrDefault() { return idleTimeoutSeconds != null ? idleTimeoutSeconds : 300; }
-    }
-
-    public record LlmConfig(
-            String model, String baseUrl, String apiKeyEnv,
-            Integer maxTokens, Double temperature
-    ) {
-        public String modelOrDefault()     { return model      != null ? model      : "meta/llama-3.3-70b-instruct"; }
-        public String baseUrlOrDefault()   { return baseUrl    != null ? baseUrl    : "https://integrate.api.nvidia.com/v1"; }
-        public String apiKeyEnvOrDefault() { return apiKeyEnv  != null ? apiKeyEnv  : "NVIDIA_API_KEY"; }
-        public int    maxTokensOrDefault() { return maxTokens  != null ? maxTokens  : 4096; }
-        public double temperatureOrDefault(){ return temperature != null ? temperature : 0.2; }
-    }
-
-    public record AgentConfig(
-            String skillsDir,
-            Integer maxRounds,
-            Integer maxDelegations,
-            Integer maxToolCalls,
-            Integer maxConcurrentMissions,
-            String contextLoading,
-            Integer negotiatingTimeoutSeconds,
-            Boolean seeInternalTools,     // true = include internal:true capabilities in the injected capability list
-            Boolean requireToolOnRound1,  // false = skip the round-1 "must invoke a tool" guard (for pure generators)
-            Boolean requireDelegationOnRound1, // false = skip the round-1 chat safety net requiring delegation
-            List<String> toolTags         // empty/null = no filter (see all); ["filesystem","code"] = tag-based filter
-    ) {
-        public int          maxRoundsOrDefault()            { return maxRounds              != null ? maxRounds              : 5; }
-        public int          maxDelegationsOrDefault()       { return maxDelegations         != null ? maxDelegations         : 3; }
-        public int          maxToolCallsOrDefault()         { return maxToolCalls           != null ? maxToolCalls           : 20; }
-        public int          maxConcurrentOrDefault()        { return maxConcurrentMissions  != null ? maxConcurrentMissions  : 1; }
-        public String       contextLoadingOrDefault()       { return contextLoading         != null ? contextLoading         : "lazy"; }
-        public int          negotiatingTimeoutOrDefault()   { return negotiatingTimeoutSeconds != null ? negotiatingTimeoutSeconds : 120; }
-        public boolean      seeInternalToolsOrDefault()    { return seeInternalTools       != null && seeInternalTools; }
-        public boolean      requireToolOnRound1OrDefault() { return requireToolOnRound1    == null || requireToolOnRound1; }
-        public boolean      requireDelegationOnRound1OrDefault() { return requireDelegationOnRound1 == null || requireDelegationOnRound1; }
-        public List<String> toolTagsOrDefault()            { return toolTags               != null ? toolTags               : List.of(); }
-    }
-
-    public record ThinkingConfig(
-            List<String> steps,
-            Long cycleDelayMs,
-            Long backgroundThresholdMs,
-            String background
-    ) {
-        public List<String> stepsOrDefault() { return steps != null ? steps : List.of("⏳ Thinking..."); }
-        public long cycleDelayMsOrDefault()  { return cycleDelayMs != null ? cycleDelayMs : 12000L; }
-        public long backgroundThresholdMsOrDefault() { return backgroundThresholdMs != null ? backgroundThresholdMs : 120000L; }
-        public String backgroundOrDefault()  { return background != null ? background : "⏳ Still working on it. I'll notify you here when ready! 🔔"; }
-    }
-
-    public record CapabilityDecl(
-            String name, String description, String version,
-            String triggerEvent,   // null for agents; event type the tool subscribes to
-            Boolean exclusive, Double bidWeight, List<String> tags,
-            Boolean internal,      // true = hidden from orchestrators; only visible to agents with seeInternalTools
-            String replyEvent,     // event type published as response (e.g. "chat.response")
-            JsonNode inputSchema,  // JSON Schema for input parameters
-            JsonNode outputSchema  // JSON Schema for output (documentation)
-    ) {
-        public boolean exclusiveOrDefault()  { return exclusive  != null && exclusive; }
-        public double  bidWeightOrDefault()  { return bidWeight  != null ? bidWeight  : 1.0; }
-        public boolean internalOrDefault()   { return internal   != null && internal; }
-    }
-
-    // ── UDS boot ──────────────────────────────────────────────────────────────
-
-    @FunctionalInterface
-    public interface PluginLogic {
-        void run(InputStream in, OutputStream out) throws Exception;
-    }
-
-    /**
-     * Connects to the kernel, sends plugin.register + plugin.ready, then runs the plugin logic.
-     */
-    public static void connectAndRun(String socketPath, PluginConfig config, PluginLogic logic) {
-        var addr = UnixDomainSocketAddress.of(Path.of(socketPath));
-        try (var ch = SocketChannel.open(addr)) {
-            var out = Channels.newOutputStream(ch);
-            var in  = Channels.newInputStream(ch);
-
-            System.out.println("[" + config.id().toUpperCase() + "] Connected to kernel.");
-
-            String payload;
-            try {
-                var node = MAPPER.valueToTree(config);
-                if (node instanceof com.fasterxml.jackson.databind.node.ObjectNode objNode) {
-                    objNode.put("pid", ProcessHandle.current().pid());
-                    payload = MAPPER.writeValueAsString(objNode);
-                } else {
-                    payload = MAPPER.writeValueAsString(config);
-                }
-            } catch (Exception e) {
-                payload = MAPPER.writeValueAsString(config);
-            }
-
-            writeFrame(out, MAPPER.writeValueAsString(
-                    Event.of("plugin.register", payload, config.id())));
-            String readyPayload;
-            try {
-                readyPayload = MAPPER.writeValueAsString(java.util.Map.of("id", config.id(), "pid", ProcessHandle.current().pid()));
-            } catch (Exception e) {
-                readyPayload = config.id();
-            }
-
-            writeFrame(out, MAPPER.writeValueAsString(
-                    Event.of("plugin.ready", readyPayload, config.id())));
-
-            logic.run(in, out);
-
-        } catch (Exception e) {
-            System.err.println("[" + config.id().toUpperCase() + "] Connection error: " + e.getMessage());
-        }
-    }
-
-    public static PluginConfig loadConfig(String jsonPath) throws Exception {
-        System.out.println("[EVENT] Loading config: " + jsonPath);
-        return MAPPER.readValue(Files.readString(Path.of(jsonPath)), PluginConfig.class);
-    }
 }

@@ -3,6 +3,7 @@
 //DEPS com.fasterxml.jackson.core:jackson-databind:2.17.2
 //DEPS com.fasterxml.jackson.datatype:jackson-datatype-jsr310:2.17.2
 //SOURCES ../../kernel/Event.java
+//SOURCES ../../kernel/PluginConfig.java
 //SOURCES ../../kernel/BasePlugin.java
 
 import com.fasterxml.jackson.databind.JsonNode;
@@ -180,7 +181,9 @@ public class DemoRunner {
 
     void handleResult(Event event, OutputStream out) throws Exception {
         String corrId = event.correlationId();
-        String label  = pending.get(corrId); // use get instead of remove so both print
+        // Remove only on the last expected result (latch=1); keep the entry for earlier deliveries
+        // so that collapsed duplicates and the cache-hit request all pass the null-check.
+        String label = latch.getCount() == 1 ? pending.remove(corrId) : pending.get(corrId);
         if (label == null) return;
 
         JsonNode wrapper = Event.MAPPER.readTree(event.payload());

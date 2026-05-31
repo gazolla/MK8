@@ -3,6 +3,7 @@
 //DEPS com.fasterxml.jackson.core:jackson-databind:2.17.2
 //DEPS com.fasterxml.jackson.datatype:jackson-datatype-jsr310:2.17.2
 //SOURCES ../../kernel/Event.java
+//SOURCES ../../kernel/PluginConfig.java
 //SOURCES ../../kernel/BasePlugin.java
 
 import com.fasterxml.jackson.databind.JsonNode;

@@ -1,6 +1,5 @@
 // Shared file — included via //SOURCES in Kernel.java. No JBang header.
 
-import com.fasterxml.jackson.databind.JsonNode;
 import java.util.*;
 import java.util.concurrent.*;
 
@@ -13,41 +12,38 @@ import java.util.concurrent.*;
  *   2. Request collapsing (Single-Flight): If correlationId is already in-flight,
  *      collapses duplicate calls, queuing the callers.
  *   3. Result distribution: On result arrival, delivers it to all collapsed callers
- *      and caches the result for 5 minutes.
+ *      and caches the result for CACHE_TTL_MINUTES minutes.
  */
 class IdempotencyInterceptor implements EventInterceptor {
 
-    // correlationId → cached result/error Event
-    private final Map<String, Event> cache = new ConcurrentHashMap<>();
+    private static final long CACHE_TTL_MINUTES = 5;
+    private static final int  CORR_ID_LOG_LEN   = 8;
 
-    // correlationId → List of pluginIds waiting for the result
+    // correlationId → cached result/error Event
+    private final Map<String, Event>        cache    = new ConcurrentHashMap<>();
+
+    // correlationId → list of pluginIds waiting for the result
     private final Map<String, List<String>> inFlight = new ConcurrentHashMap<>();
 
     private final KernelBus bus;
 
-    private final ScheduledExecutorService scheduler = Executors.newSingleThreadScheduledExecutor(r -> {
-        Thread t = new Thread(r, "idempotency-cleaner");
-        t.setDaemon(true);
-        return t;
-    });
+    private final ScheduledExecutorService scheduler =
+            Executors.newSingleThreadScheduledExecutor(
+                    Thread.ofPlatform().name("idempotency-cleaner").daemon(true).factory());
 
     IdempotencyInterceptor(KernelBus bus) {
         this.bus = bus;
     }
 
+    // ── EventInterceptor ──────────────────────────────────────────────────────
+
     @Override
     public boolean intercept(Event event, String json) throws Exception {
-        String type = event.type();
-
-        if ("capability.invoke".equals(type)) {
-            return handleInvoke(event, json);
-        }
-
-        if ("capability.result".equals(type) || "capability.error".equals(type)) {
-            return handleResult(event, json);
-        }
-
-        return false;
+        return switch (event.type()) {
+            case "capability.invoke"                      -> handleInvoke(event, json);
+            case "capability.result", "capability.error" -> handleResult(event, json);
+            default                                       -> false;
+        };
     }
 
     // ── Invoke handling ───────────────────────────────────────────────────────
@@ -56,67 +52,81 @@ class IdempotencyInterceptor implements EventInterceptor {
         String corrId = event.correlationId();
         if (corrId == null) return false; // can't enforce idempotency without correlationId
 
-        // Case 1: Return cached result
+        // Case 1: Return cached result instantly (checked before acquiring inFlight lock)
         Event cached = cache.get(corrId);
         if (cached != null) {
-            System.out.println("[IDEMPOTENCY] Cache hit for corrId=" + corrId.substring(0, 8)
+            System.out.println("[IDEMPOTENCY] Cache hit for corrId=" + shortId(corrId)
                     + " → returning cached result to " + event.source());
-            
-            // Build the response event with the caller's target correlationId
-            String resJson = Event.MAPPER.writeValueAsString(cached);
-            bus.sendTo(event.source(), resJson);
-            return true; // consume event
+            bus.sendTo(event.source(), Event.MAPPER.writeValueAsString(cached));
+            return true;
         }
 
-        // Case 2: Request Collapsing (Single-Flight)
-        List<String> callers = inFlight.get(corrId);
-        if (callers != null) {
-            System.out.println("[IDEMPOTENCY] Collapsing duplicate invoke for corrId=" + corrId.substring(0, 8)
-                    + " from " + event.source());
-            callers.add(event.source());
-            return true; // consume duplicate invoke so it's not routed to provider again
-        }
+        // Cases 2 & 3 are decided atomically via compute() on the inFlight map.
+        // This closes the race window between the cache miss above and the inFlight check:
+        // if handleResult() runs between those two points, inFlight will be empty but cache
+        // will be populated — the re-check inside compute() catches that and returns the
+        // cached result instead of registering a new in-flight entry.
+        boolean[] consumed = {false};
+        inFlight.compute(corrId, (k, callers) -> {
+            // Re-check cache inside the atomic compute block
+            Event recheck = cache.get(corrId);
+            if (recheck != null) {
+                System.out.println("[IDEMPOTENCY] Cache hit (recheck) for corrId=" + shortId(corrId)
+                        + " → returning cached result to " + event.source());
+                try { bus.sendTo(event.source(), Event.MAPPER.writeValueAsString(recheck)); }
+                catch (Exception ignored) {}
+                consumed[0] = true;
+                return null; // do not create an inFlight entry
+            }
 
-        // Case 3: First execution — register in-flight
-        callers = new CopyOnWriteArrayList<>();
-        callers.add(event.source());
-        inFlight.put(corrId, callers);
-        return false; // let it route to the provider
+            if (callers != null) {
+                // Case 2: already in-flight — collapse
+                System.out.println("[IDEMPOTENCY] Collapsing duplicate invoke for corrId=" + shortId(corrId)
+                        + " from " + event.source());
+                callers.add(event.source());
+                consumed[0] = true;
+                return callers;
+            }
+
+            // Case 3: first execution — register in-flight
+            List<String> first = new CopyOnWriteArrayList<>();
+            first.add(event.source());
+            return first;
+        });
+        return consumed[0];
     }
 
-    // ── Result / Error caching and routing ────────────────────────────────────
+    // ── Result / Error caching and delivery ──────────────────────────────────
 
     private boolean handleResult(Event event, String json) throws Exception {
         String corrId = event.correlationId();
         if (corrId == null) return false;
 
         List<String> callers = inFlight.remove(corrId);
-        if (callers == null) {
-            // Not a result we are tracking or already resolved — let normal routing continue
-            return false;
-        }
+        if (callers == null) return false; // not tracking this corrId
 
-        // Cache the result/error
         cache.put(corrId, event);
-        System.out.println("[IDEMPOTENCY] Caching result for corrId=" + corrId.substring(0, 8)
+        System.out.println("[IDEMPOTENCY] Caching result for corrId=" + shortId(corrId)
                 + " (" + callers.size() + " caller(s))");
 
-        // Expire from cache after 5 minutes
         scheduler.schedule(() -> {
             cache.remove(corrId);
-            System.out.println("[IDEMPOTENCY] Expired cache entry for corrId=" + corrId.substring(0, 8));
-        }, 5, TimeUnit.MINUTES);
+            System.out.println("[IDEMPOTENCY] Expired cache entry for corrId=" + shortId(corrId));
+        }, CACHE_TTL_MINUTES, TimeUnit.MINUTES);
 
-        // Deliver result manually to all waiting callers
         for (String callerId : callers) {
             System.out.println("[IDEMPOTENCY] Delivering result to caller: " + callerId);
             bus.sendTo(callerId, json);
         }
 
         // Clean up the return-routing table to prevent memory leak.
-        // Uses KernelBus to avoid direct coupling to Kernel's static fields.
         bus.removePendingRoute(corrId);
+        return true;
+    }
 
-        return true; // consume the result (handled manually)
+    // ── Helpers ───────────────────────────────────────────────────────────────
+
+    private static String shortId(String corrId) {
+        return corrId.length() > CORR_ID_LOG_LEN ? corrId.substring(0, CORR_ID_LOG_LEN) : corrId;
     }
 }

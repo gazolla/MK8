@@ -7,6 +7,7 @@
 //SOURCES CapabilityIndex.java
 //SOURCES IdempotencyInterceptor.java
 
+import com.fasterxml.jackson.databind.JsonNode;
 import java.io.IOException;
 import java.io.InputStream;
 import java.io.OutputStream;
@@ -34,8 +35,8 @@ import java.util.concurrent.*;
  */
 public class Kernel {
 
-    // True constant — socket path is fixed for the whole JVM lifetime.
-    static final Path SOCKET_PATH = Path.of("/tmp/mk7/kernel.sock");
+    // Socket path — override at runtime with -Dmk8.socket=/path/to/kernel.sock
+    static final Path SOCKET_PATH = Path.of(Event.DEFAULT_SOCKET);
 
     // ── Instance-owned routing tables ────────────────────────────────────────
     final ConcurrentHashMap<String, CopyOnWriteArrayList<Connection>> exactRoutes  = new ConcurrentHashMap<>();
@@ -123,26 +124,32 @@ public class Kernel {
     // ── Registration ──────────────────────────────────────────────────────────
 
     Connection register(Event event, SocketChannel channel) throws Exception {
-        Event.PluginConfig config = Event.MAPPER.readValue(event.payload(), Event.PluginConfig.class);
-        Connection conn = new Connection(config.id(), channel);
+        JsonNode cfg      = Event.MAPPER.readTree(event.payload());
+        String   pluginId = cfg.path("id").asText("");
+        Connection conn   = new Connection(pluginId, channel);
 
-        byPluginId.put(config.id(), conn);
+        byPluginId.put(pluginId, conn);
 
-        for (String type : config.subscribesOrEmpty()) {
-            exactRoutes.computeIfAbsent(type, k -> new CopyOnWriteArrayList<>()).add(conn);
+        JsonNode subs = cfg.path("subscribes");
+        if (subs.isArray()) {
+            for (JsonNode s : subs)
+                exactRoutes.computeIfAbsent(s.asText(), k -> new CopyOnWriteArrayList<>()).add(conn);
         }
-        for (String pattern : config.wildcardSubscribesOrEmpty()) {
-            if (pattern.endsWith("*")) {
-                String prefix = pattern.substring(0, pattern.length() - 1);
-                prefixRoutes.add(new PrefixRoute(prefix, conn));
-            } else {
-                System.err.println("[KERNEL] Invalid wildcard (must end with *): " + pattern);
+
+        JsonNode wildcards = cfg.path("wildcardSubscribes");
+        if (wildcards.isArray()) {
+            for (JsonNode w : wildcards) {
+                String pattern = w.asText();
+                if (pattern.endsWith("*"))
+                    prefixRoutes.add(new PrefixRoute(pattern.substring(0, pattern.length() - 1), conn));
+                else
+                    System.err.println("[KERNEL] Invalid wildcard (must end with *): " + pattern);
             }
         }
 
-        System.out.println("[KERNEL] Registered: " + config.id()
-                + " subscribes=" + config.subscribesOrEmpty().size()
-                + " wildcards="  + config.wildcardSubscribesOrEmpty().size());
+        System.out.println("[KERNEL] Registered: " + pluginId
+                + " subscribes=" + (subs.isArray() ? subs.size() : 0)
+                + " wildcards="  + (wildcards.isArray() ? wildcards.size() : 0));
         return conn;
     }
 

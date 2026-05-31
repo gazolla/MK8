@@ -21,7 +21,7 @@ import java.util.concurrent.TimeUnit;
  */
 public class Start {
 
-    private static final Path   SOCKET_PATH = Path.of("/tmp/mk7/kernel.sock");
+    private static final Path   SOCKET_PATH = Path.of("/tmp/mk8/kernel.sock");
     private static final File   START_LOG   = new File("logs/start.log");
     private static final List<Process> backgroundProcesses = new ArrayList<>();
 

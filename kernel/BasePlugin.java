@@ -1,10 +1,54 @@
 // Shared file — included via //SOURCES in each plugin (no JBang header).
-// Eliminates the repeated connect → event-loop boilerplate.
 
 import com.fasterxml.jackson.databind.JsonNode;
+import com.fasterxml.jackson.databind.node.ObjectNode;
+import java.io.InputStream;
 import java.io.OutputStream;
+import java.net.UnixDomainSocketAddress;
+import java.nio.channels.Channels;
+import java.nio.channels.SocketChannel;
+import java.nio.file.Path;
+import java.util.List;
 import java.util.Map;
 import java.util.concurrent.Executors;
+
+// ── UDS boot (plugin-side only) ───────────────────────────────────────────────
+
+class PluginBoot {
+
+    @FunctionalInterface
+    interface PluginLogic {
+        void run(InputStream in, OutputStream out) throws Exception;
+    }
+
+    static void connectAndRun(String socketPath, PluginConfig config, PluginLogic logic) {
+        var addr = UnixDomainSocketAddress.of(Path.of(socketPath));
+        try (var ch = SocketChannel.open(addr)) {
+            var out = Channels.newOutputStream(ch);
+            var in  = Channels.newInputStream(ch);
+
+            System.out.println("[" + config.id().toUpperCase() + "] Connected to kernel.");
+
+            long pid  = ProcessHandle.current().pid();
+            var  node = (ObjectNode) config.raw().deepCopy();
+            node.put("pid", pid);
+
+            Event.writeFrame(out, Event.MAPPER.writeValueAsString(
+                    Event.of("plugin.register", Event.MAPPER.writeValueAsString(node), config.id())));
+
+            Event.writeFrame(out, Event.MAPPER.writeValueAsString(
+                    Event.of("plugin.ready", Event.MAPPER.writeValueAsString(
+                            Map.of("id", config.id(), "pid", pid)), config.id())));
+
+            logic.run(in, out);
+
+        } catch (Exception e) {
+            System.err.println("[" + config.id().toUpperCase() + "] Connection error: " + e.getMessage());
+        }
+    }
+}
+
+// ── BasePlugin ────────────────────────────────────────────────────────────────
 
 public class BasePlugin {
 
@@ -13,13 +57,9 @@ public class BasePlugin {
         void handle(String json, OutputStream out) throws Exception;
     }
 
-    /**
-     * Loads plugin.json, connects to the kernel, registers declared capabilities,
-     * then dispatches each received frame to handler in a separate virtual thread.
-     */
     public static void run(String configPath, String socketPath, EventHandler handler) throws Exception {
-        var config = Event.loadConfig(configPath);
-        Event.connectAndRun(socketPath, config, (in, out) -> {
+        var config = PluginConfig.load(configPath);
+        PluginBoot.connectAndRun(socketPath, config, (in, out) -> {
             registerCapabilities(config, out);
             var executor = Executors.newVirtualThreadPerTaskExecutor();
             String json;
@@ -49,13 +89,9 @@ public class BasePlugin {
         });
     }
 
-    /**
-     * Same as run() but processes frames one at a time.
-     * Use when ordering matters (e.g. LoggerPlugin writing to file).
-     */
     public static void runSync(String configPath, String socketPath, EventHandler handler) throws Exception {
-        var config = Event.loadConfig(configPath);
-        Event.connectAndRun(socketPath, config, (in, out) -> {
+        var config = PluginConfig.load(configPath);
+        PluginBoot.connectAndRun(socketPath, config, (in, out) -> {
             registerCapabilities(config, out);
             String json;
             while ((json = Event.readFrame(in)) != null) {
@@ -81,37 +117,36 @@ public class BasePlugin {
         });
     }
 
-    /** Sends capability.register for each capability declared in config. */
-    public static void registerCapabilities(Event.PluginConfig config, OutputStream out) throws Exception {
-        for (Event.CapabilityDecl cap : config.capabilitiesOrEmpty()) {
+    public static void registerCapabilities(PluginConfig config, OutputStream out) throws Exception {
+        for (JsonNode cap : config.capabilities()) {
             var reg = new java.util.LinkedHashMap<String, Object>();
-            reg.put("name",      cap.name());
+            reg.put("name",      cap.path("name").asText());
             reg.put("pluginId",  config.id());
-            reg.put("version",   cap.version() != null ? cap.version() : "1.0.0");
-            reg.put("exclusive", cap.exclusiveOrDefault());
-            reg.put("bidWeight", cap.bidWeightOrDefault());
-            if (cap.triggerEvent() != null) reg.put("triggerEvent", cap.triggerEvent());
-            if (cap.tags() != null)         reg.put("tags", cap.tags());
+            reg.put("version",   cap.path("version").asText("1.0.0"));
+            reg.put("exclusive", cap.path("exclusive").asBoolean(false));
+            reg.put("bidWeight", cap.path("bidWeight").asDouble(1.0));
+            String trigger = cap.path("triggerEvent").asText(null);
+            if (trigger != null && !trigger.isBlank()) reg.put("triggerEvent", trigger);
+            JsonNode tags = cap.path("tags");
+            if (tags.isArray() && !tags.isEmpty())     reg.put("tags", tags);
             Event.writeFrame(out, Event.MAPPER.writeValueAsString(
                     Event.of("capability.register", Event.MAPPER.writeValueAsString(reg), config.id())));
         }
     }
 
-    /** Auto-responds to capability.bid.request using capabilities declared in plugin.json. */
-    public static void handleBidAuto(Event.PluginConfig config, Event event, OutputStream out) {
+    public static void handleBidAuto(PluginConfig config, Event event, OutputStream out) {
         try {
             JsonNode req   = Event.MAPPER.readTree(event.payload());
-            String capName = req.has("capabilityName") ? req.get("capabilityName").asText() : "";
-            String corrId  = req.has("correlationId")  ? req.get("correlationId").asText()
-                                                        : event.correlationId();
-            config.capabilitiesOrEmpty().stream()
-                  .filter(c -> c.name().equals(capName))
+            String capName = req.path("capabilityName").asText("");
+            String corrId  = req.path("correlationId").asText(event.correlationId());
+            config.capabilities().stream()
+                  .filter(c -> c.path("name").asText("").equals(capName))
                   .findFirst()
                   .ifPresent(cap -> {
                       try {
                           String bid = Event.MAPPER.writeValueAsString(Map.of(
                               "agentId",       config.id(),
-                              "score",         cap.bidWeightOrDefault(),
+                              "score",         cap.path("bidWeight").asDouble(1.0),
                               "load",          0.0,
                               "correlationId", corrId != null ? corrId : ""));
                           publish(Event.of("capability.bid.response", bid, config.id()), out);
@@ -132,10 +167,6 @@ public class BasePlugin {
         try { publish(e, out); } catch (Exception ignored) {}
     }
 
-    /**
-     * Publishes a log.{level} event to the Logger plugin.
-     * Levels: debug, info, warn, error
-     */
     public static void publishLog(String level, String message, String source, OutputStream out) {
         try {
             String payload = Event.MAPPER.writeValueAsString(
