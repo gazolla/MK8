@@ -168,6 +168,6 @@ The diagram below details the interaction model across the asynchronous boundari
 During the processing loop shown above, the Kernel actively monitors for optimization hooks using interceptors before routing packages to virtual threads:
 
 1. **Request Collapsing (Single-Flight):**
-   * If `DemoRunner` issues three identical `text.analyze` requests concurrently, the Kernel's `IdempotencyInterceptor` catches the duplicate correlation keys, pauses the duplicate callers, routes only a single transaction to the `SummaryAgent`, and broadcasts the final report to all three waiting streams once received.
+   * `DemoRunner` issues two identical `text.analyze` requests concurrently (Requests #1 and #2, same `corrId=haiku-collapsed-id`). The Kernel's `IdempotencyInterceptor` catches the duplicate correlation key, collapses the second call, routes only a single transaction to the `SummaryAgent`, and delivers the final report to both waiting callers once received.
 2. **Sliding-Window Idempotency Caching:**
-   * If `DemoRunner` requests the identical analysis sequencially within a 5-minute window, the Kernel fulfills the request in **less than 1 millisecond** using its sliding-window cache, bypassing the `SummaryAgent` and saving computational cycles.
+   * After both collapsed results are delivered, `DemoRunner` issues the same request a third time sequentially (Request #3, same `corrId`). The Kernel fulfills the request in **less than 1 millisecond** using its sliding-window cache, bypassing the `SummaryAgent` and `WordCountTool` entirely.

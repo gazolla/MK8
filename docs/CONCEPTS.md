@@ -6,7 +6,7 @@ This document outlines the architectural patterns and communication protocols im
 
 ## 1. Event Bus and UDS Protocol
 
-The system runs on an asynchronous event bus communicating via Unix Domain Sockets (UDS) located at `/tmp/mk7/kernel.sock`. 
+The system runs on an asynchronous event bus communicating via Unix Domain Sockets (UDS) located at `/tmp/mk8/kernel.sock`. 
 
 ### Length-Prefixed Frame Protocol
 To guarantee message integrity without parsing streams line-by-line, the system uses a binary length-prefixed framing protocol:

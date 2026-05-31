@@ -10,8 +10,9 @@ All primary microkernel classes reside inside the `kernel` directory, sharing a 
 
 ```
 kernel/
-├── Kernel.java                 # UDS Server, connection manager, routing maps
-├── Event.java                  # Unified envelope, frame protocol, configuration loader
+├── Kernel.java                 # UDS Server, connection manager, routing maps, core interfaces
+├── Event.java                  # Unified envelope, frame protocol, logging infrastructure
+├── PluginConfig.java           # plugin.json mapping (typed record accessors)
 ├── BasePlugin.java             # Connection bootstrap, virtual thread dispatcher
 ├── PluginManager.java          # Plugin discovery, catalog, lifecycle (spawn, kill, track)
 ├── CapabilityIndex.java        # Live registry, bid request broker, auction scheduler
@@ -43,8 +44,8 @@ The contract between `CapabilityIndex` and `PluginManager`. `CapabilityIndex` de
 interface PluginRuntime {
     // Catalog
     void awaitReady(long timeoutMs);
-    PluginManager.CatalogEntry getByCapName(String capName);
-    Collection<PluginManager.CatalogEntry> allEntries();
+    CatalogEntry getByCapName(String capName);
+    Collection<CatalogEntry> allEntries();
     void refresh();
     // Lifecycle
     void spawnOnDemand(String capabilityName) throws Exception;
@@ -73,13 +74,16 @@ The gateway server managing network sockets and connections.
   - `findProjectRoot()`: Resolves project root by searching parent directories for the `kernel` directory or a `Start.java` anchor.
 
 ### `Event.java`
-Defines the structure of messages and physical framing.
+Defines the structure of messages, physical framing, and shared logging infrastructure.
 - **Key Records**:
   - `Event`: Represents the event envelope record.
-  - `PluginConfig`: Models configuration properties declared in `plugin.json`.
 - **Key Methods**:
   - `readFrame(InputStream in)`: Reads a 4-byte header and parses the specified payload size from a UDS stream.
   - `writeFrame(OutputStream out, String json)`: Encapsulates a JSON payload into a length-prefixed frame.
+  - `initLogging()`: Installs a `TimestampPrintStream` on `System.out`/`System.err`; safe to call multiple times (guarded by a system property flag).
+
+### `PluginConfig.java`
+Typed record wrapping the raw `JsonNode` parsed from `plugin.json`. Provides accessor methods for all config sections: root identity (`id`, `type`, `version`), `lifecycle`, `capabilities`, `launch`, `llm`, `agent`, and `thinking`. Loaded via `PluginConfig.load(path)`.
 
 ### `BasePlugin.java`
 Removes repetitive client connection and registration boilerplate.

@@ -14,7 +14,8 @@ For a conceptual deep dive into the system's core design patterns — such as ca
   * 📁 **`logs/`** — Auto-created on first run. Contains `start.log` (full run transcript), `kernel.log`, `summary-agent.log`, and `word-count.log`.
   * 📁 **`kernel/`** *(MicroKernel Core Infrastructure)*
     * 📄 **[Kernel.java](kernel/Kernel.java)** — UDS server, routing tables, interceptor chain wiring, and top-level records (`CatalogEntry`, `PrefixRoute`, `Connection`). Also defines the `EventInterceptor`, `KernelBus`, and `PluginRuntime` interfaces. *(See **[Core Kernel Architecture](docs/KERNEL.md)**)*
-    * 📄 **[Event.java](kernel/Event.java)** — JSON event envelope, 4-byte length-prefixed frame protocol, and Jackson factory methods. *(See **[Event Taxonomy Reference](docs/EVENTS.md)**)*
+    * 📄 **[Event.java](kernel/Event.java)** — JSON event envelope, 4-byte length-prefixed frame protocol, Jackson factory methods, and timestamp-prefixing logging. *(See **[Event Taxonomy Reference](docs/EVENTS.md)**)*
+    * 📄 **[PluginConfig.java](kernel/PluginConfig.java)** — Typed accessors for `plugin.json` (id, lifecycle, capabilities, launch command, llm, agent, thinking blocks).
     * 📄 **[BasePlugin.java](kernel/BasePlugin.java)** — Plugin bootstrap: UDS connect, `plugin.register` handshake, virtual-thread dispatcher, and auto-bidding. *(See **[BasePlugin Reference](docs/BASE_PLUGIN.md)**)*
     * 📄 **[PluginManager.java](kernel/PluginManager.java)** — Single source of truth for plugins: directory scan, catalog indexing, on-demand process spawn, idle-kill sweep. Implements `PluginRuntime`. *(See **[PluginManager Guide](docs/PLUGIN_MANAGER.md)**)*
     * 📄 **[CapabilityIndex.java](kernel/CapabilityIndex.java)** — Live capability registry, bidding auction engine, built-in capability dispatcher. Depends only on `PluginRuntime` — zero reference to `PluginManager`. *(See **[CapabilityIndex Guide](docs/CAPABILITY_INDEX.md)**)*

@@ -25,6 +25,7 @@ The interceptor operates under intense, concurrent virtual thread execution. To 
 * **`cache` Map:** A thread-safe `ConcurrentHashMap` mapping a `correlationId` to the cached `Event` payload.
 * **`inFlight` Map:** A `ConcurrentHashMap` mapping a `correlationId` to a thread-safe `CopyOnWriteArrayList<String>` containing the list of waiting caller plugin IDs.
 * **`scheduler` Engine:** A daemon thread `ScheduledExecutorService` that automatically runs cleanups, evicting cached items after their 5-minute sliding-window TTL expires.
+* **Atomic Cache+InFlight Decision:** The cache-hit check and the in-flight registration/collapsing decision are made atomically inside a single `ConcurrentHashMap.compute()` call. This closes the race window where `handleResult()` could transition `inFlight → cache` between the initial cache check and the subsequent in-flight lookup, which would otherwise allow a duplicate invoke to bypass both guards and reach the downstream provider.
 
 ---
 
@@ -41,27 +42,32 @@ The sequence flowchart below illustrates how the interceptor handles incoming `c
                       [Is corrId cached in Map?]
                        ┌──────────┴──────────┐
                        ▼ (Yes: Cache Hit)    ▼ (No: Cache Miss)
-               [Read Event payload]     [Is corrId active in-flight?]
-                       │                     ┌──────────┴──────────┐
-                       │                     ▼ (Yes)               ▼ (No)
-                       │             [Add Caller ID to      [Register corrId in-flight]
-                       │              CopyOnWriteArrayList]        │
-                       │                     │                     ▼
-                       │                     ▼            [Allow normal routing
-                       │              [Halt Routing        to downstream tool]
-                       │               (Consume Event)]            │
-                       │                     │                     ▼
-                       │                     │             [Receive result from tool]
-                       │                     │                     │
-                       │                     │                     ▼
-                       │                     │             [Deliver result to all
-                       │                     │              waiting callers in list]
-                       │                     │                     │
-                       │                     │                     ▼
-                       │                     │             [Cache outcome & start
-                       │                     │              5-minute TTL eviction]
-                       ▼                     ▼                     │
-               [Deliver Cached Event] ◄──────┴─────────────────────┘
+               [Deliver cached event]   [Enter inFlight.compute() — atomic]
+               [Return true — halt]          │
+                                      [Re-check cache inside compute()]
+                                       ┌─────┴──────┐
+                                       ▼ (Hit)       ▼ (Miss)
+                               [Deliver cached]  [Is corrId active in-flight?]
+                               [Return null —]    ┌──────────┴──────────┐
+                               [no inFlight       ▼ (Yes)               ▼ (No)
+                                entry created] [Add caller ID to    [Create new inFlight
+                                               CopyOnWriteArrayList] entry for corrId]
+                                               [Return true — halt]  [Return false —
+                                                                       route to provider]
+                                                                             │
+                                                                             ▼
+                                                                  [Receive result from tool]
+                                                                             │
+                                                                             ▼
+                                                                  [Deliver result to all
+                                                                   waiting callers in list]
+                                                                             │
+                                                                             ▼
+                                                                  [Cache outcome & start
+                                                                   5-minute TTL eviction]
+                                                                             │
+                                                                             ▼
+                                                                  [removePendingRoute(corrId)]
 ```
 
 ---
@@ -82,7 +88,7 @@ The sequence flowchart below illustrates how the interceptor handles incoming `c
 ### B. Internal Workload Processing
 
 #### `private boolean handleInvoke(Event event, String json) throws Exception`
-* **Description:** Manages cache hit evaluations and registers concurrent callers for Single-Flight collapsing.
+* **Description:** Manages cache hit evaluations and registers concurrent callers for Single-Flight collapsing. The cache-miss path and in-flight registration are resolved atomically inside a single `inFlight.compute()` call; a re-check of the cache inside `compute()` closes the race window between the initial cache lookup and the in-flight decision.
 
 #### `private boolean handleResult(Event event, String json) throws Exception`
 * **Description:** Manages the arrival of computed results, caches the payloads, starts the 5-minute eviction scheduler, delivers the response to all registered callers, and calls `bus.removePendingRoute(corrId)` to clean up the return-routing table and prevent memory leaks.

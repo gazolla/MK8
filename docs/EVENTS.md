@@ -1,6 +1,6 @@
 # Event Taxonomy
 
-This document lists the event types that the MK8 MicroKernel actually implements and routes. Events are the only communication mechanism between the Kernel and plugins — all messages travel as length-prefixed JSON frames over a Unix Domain Socket at `/tmp/mk7/kernel.sock`.
+This document lists the event types that the MK8 MicroKernel actually implements and routes. Events are the only communication mechanism between the Kernel and plugins — all messages travel as length-prefixed JSON frames over a Unix Domain Socket at `/tmp/mk8/kernel.sock`.
 
 The bus is intentionally extensible: any plugin can publish and subscribe to custom event types. Only the types listed here carry built-in Kernel or interceptor behavior.
 
