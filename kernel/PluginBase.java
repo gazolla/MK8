@@ -8,7 +8,6 @@ import java.net.UnixDomainSocketAddress;
 import java.nio.channels.Channels;
 import java.nio.channels.SocketChannel;
 import java.nio.file.Path;
-import java.util.List;
 import java.util.Map;
 import java.util.concurrent.Executors;
 
@@ -23,9 +22,7 @@ import java.util.concurrent.Executors;
  * dispatching, and serializes outbound replies back to the microkernel event
  * bus.
  *
- * Handlers can be executed concurrently using virtual threads (run) or
- * sequentially
- * on the reader thread (runSync) when strict event ordering is required.
+ * Handlers are executed concurrently using virtual threads (run).
  * Virtual thread dispatches load the event's traceId and spanId to ThreadLocals
  * automatically so that all downstream logging and child events inherit
  * context.
@@ -72,37 +69,6 @@ public class PluginBase {
                         KernelEvent.CURRENT_SPAN_ID.remove();
                     }
                 });
-            }
-        });
-    }
-
-    public static void runSync(String configPath, String socketPath, EventHandler handler) throws Exception {
-        var config = PluginConfig.load(configPath);
-        PluginBoot.connectAndRun(socketPath, config, (in, out) -> {
-            registerCapabilities(config, out);
-            String json;
-            while ((json = KernelEvent.readFrame(in)) != null) {
-                try {
-                    KernelEvent ev = null;
-                    try {
-                        ev = KernelEvent.MAPPER.readValue(json, KernelEvent.class);
-                        if (ev.traceId() != null)
-                            KernelEvent.CURRENT_TRACE_ID.set(ev.traceId());
-                        if (ev.spanId() != null)
-                            KernelEvent.CURRENT_SPAN_ID.set(ev.spanId());
-                    } catch (Exception ignored) {
-                    }
-                    if (ev != null && "capability.bid.request".equals(ev.type())) {
-                        handleBidAuto(config, ev, out);
-                        continue;
-                    }
-                    handler.handle(json, out);
-                } catch (Exception e) {
-                    System.err.println("[" + config.id().toUpperCase() + "] Handler error: " + e.getMessage());
-                } finally {
-                    KernelEvent.CURRENT_TRACE_ID.remove();
-                    KernelEvent.CURRENT_SPAN_ID.remove();
-                }
             }
         });
     }
@@ -164,14 +130,7 @@ public class PluginBase {
         }
     }
 
-    public static void publishLog(String level, String message, String source, OutputStream out) {
-        try {
-            String payload = KernelEvent.MAPPER.writeValueAsString(
-                    Map.of("level", level, "message", message, "source", source));
-            publishSafe(KernelEvent.of("log." + level, payload, source), out);
-        } catch (Exception ignored) {
-        }
-    }
+
 }
 
 // ── UDS boot (plugin-side only)

@@ -1,0 +1,23 @@
+Segurança e controle de acesso
+
+AuthorizationInterceptor — verifica se o plugin source tem permissão para invocar determinada capability antes de rotear
+RateLimitInterceptor — limita invocações por plugin/capability por janela de tempo, publica capability.error se exceder
+Observabilidade
+
+TracingInterceptor — propaga e enriquece traceId/spanId em cada evento, integra com OpenTelemetry
+MetricsInterceptor — conta invocações, mede latência, publica métricas (Prometheus, Micrometer)
+AuditInterceptor — persiste log imutável de todos os eventos (quem invocou o quê e quando)
+Resiliência
+
+CircuitBreakerInterceptor — monitora falhas consecutivas de uma capability e abre o circuito temporariamente
+RetryInterceptor — re-envia capability.invoke automaticamente em caso de capability.error transiente
+TimeoutInterceptor — injeta deadline no evento e publica capability.error se o resultado não chegar a tempo
+Transformação de dados
+
+ValidationInterceptor — valida o payload contra um schema JSON antes de rotear
+TransformInterceptor — converte formatos de payload entre versões de API (versionamento de contrato)
+EncryptionInterceptor — cifra/decifra payloads para capabilities marcadas como sensíveis
+Fluxo e orquestração
+
+PriorityInterceptor — reordena a fila de invocações por prioridade declarada no payload
+WorkflowInterceptor — encadeia capabilities em sequência/paralelo a partir de uma definição declarativa

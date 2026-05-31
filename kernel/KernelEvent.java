@@ -131,22 +131,10 @@ public record KernelEvent(
         return new KernelEvent(uuid(), type, payload, now(), source, null, null, null, null, t[0], t[1]);
     }
 
-    public static KernelEvent withSession(String type, String payload, String source, String sessionId) {
-        String[] t = currentTrace();
-        if (t[0] == null) { t[0] = uuid(); t[1] = t[0]; }
-        return new KernelEvent(uuid(), type, payload, now(), source, null, sessionId, null, null, t[0], t[1]);
-    }
-
     public static KernelEvent withCorrelation(String type, String payload, String source,
                                         String correlationId, String sessionId) {
         String[] t = currentTrace();
         return new KernelEvent(uuid(), type, payload, now(), source, correlationId, sessionId, null, null, t[0], t[1]);
-    }
-
-    public static KernelEvent withTrace(String type, String payload, String source,
-                                  String correlationId, String sessionId,
-                                  String traceId, String spanId) {
-        return new KernelEvent(uuid(), type, payload, now(), source, correlationId, sessionId, null, null, traceId, spanId);
     }
 
     public static KernelEvent reply(KernelEvent origin, String type, String payload, String source) {

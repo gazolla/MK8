@@ -13,9 +13,11 @@ import java.io.InputStream;
 import java.io.OutputStream;
 import java.net.StandardProtocolFamily;
 import java.net.UnixDomainSocketAddress;
+import java.nio.ByteBuffer;
 import java.nio.channels.Channels;
 import java.nio.channels.ServerSocketChannel;
 import java.nio.channels.SocketChannel;
+import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.*;
@@ -41,6 +43,8 @@ public class Kernel {
     // Socket path — override at runtime with -Dmk8.socket=/path/to/kernel.sock
     static final Path SOCKET_PATH = Path.of(KernelEvent.DEFAULT_SOCKET);
 
+    private static final java.nio.charset.Charset UTF8 = StandardCharsets.UTF_8;
+
     // ── Instance-owned routing tables ────────────────────────────────────────
     final ConcurrentHashMap<String, CopyOnWriteArrayList<Connection>> exactRoutes  = new ConcurrentHashMap<>();
     final CopyOnWriteArrayList<PrefixRoute>                           prefixRoutes  = new CopyOnWriteArrayList<>();
@@ -49,9 +53,10 @@ public class Kernel {
 
     final ExecutorService readers = Executors.newVirtualThreadPerTaskExecutor();
 
-    // ── Option B: Kernel-Extendido fields ─────────────────────────────────────
-    // Populated once in start(); immutable after that. null until boot completes.
+    // Populated once in start(); written before accept() loop starts so all reader
+    // threads see a fully-initialized list. volatile ensures visibility across threads.
     volatile List<EventInterceptor> interceptors;
+
     // Synthetic source Connection used when bus.route() re-enters the kernel pipeline.
     // channel=null — writer thread is NOT started (guarded in Connection constructor).
     final Connection KERNEL_SOURCE = new Connection("kernel", null);
@@ -79,19 +84,17 @@ public class Kernel {
                 System.out.println("[KERNEL] Shut down.");
             }));
 
-            // ── Option B boot — wire PluginManager + CapabilityInterceptor ──────────
             Path mk8Root = findProjectRoot();
             System.out.println("[KERNEL] Project root: " + mk8Root);
 
-            var bus         = new KernelBusImpl(this);
-            var pluginMgr   = new PluginManager(bus, mk8Root);
-            Thread.ofVirtual().start(pluginMgr::scan); // background scan; doesn't block accept
+            var bus       = new KernelBusImpl(this);
+            var pluginMgr = new PluginManager(bus, mk8Root);
+            Thread.ofVirtual().start(pluginMgr::scan);
 
             var idempotency = new IdempotencyInterceptor(bus);
             var capIdx      = new CapabilityInterceptor(bus);
-            capIdx.setRuntime(pluginMgr);              // wire PluginRuntime
-            interceptors = List.of(idempotency, capIdx);             // immutable after this point
-            // ─────────────────────────────────────────────────────────────────────
+            capIdx.setRuntime(pluginMgr);
+            interceptors = List.of(idempotency, capIdx); // immutable; written before accept loop
 
             while (!Thread.currentThread().isInterrupted()) {
                 SocketChannel client = server.accept();
@@ -105,11 +108,11 @@ public class Kernel {
     void handleClient(SocketChannel channel) {
         Connection conn = null;
         try {
-            InputStream  in  = Channels.newInputStream(channel);
+            InputStream in = Channels.newInputStream(channel);
             String json;
             while ((json = KernelEvent.readFrame(in)) != null) {
                 KernelEvent event = KernelEvent.MAPPER.readValue(json, KernelEvent.class);
-                if ("plugin.register".equals(event.type())) {
+                if (EventTypes.PLUGIN_REGISTER.equals(event.type())) {
                     conn = register(event, channel);
                 } else if (conn != null) {
                     route(event, json, conn);
@@ -161,147 +164,103 @@ public class Kernel {
         exactRoutes.values().forEach(list -> list.remove(conn));
         prefixRoutes.removeIf(pr -> pr.conn() == conn);
         pendingRoutes.entrySet().removeIf(e -> e.getValue().equals(conn.pluginId));
+        conn.shutdown(); // signal writer thread to exit gracefully
         System.out.println("[KERNEL] Unregistered: " + conn.pluginId);
     }
 
     // ── Routing ───────────────────────────────────────────────────────────────
 
     void route(KernelEvent event, String json, Connection source) {
-        String type = event.type();
-
-        // Direct: message.{targetId}
-        if (type.startsWith("message.")) {
-            String targetId = type.substring("message.".length());
-            Connection target = byPluginId.get(targetId);
-            if (target != null) {
-                System.out.println("[KERNEL] route " + type + " from=" + source.pluginId + " → " + targetId);
-                enqueue(target, json);
-            } else {
-                System.err.println("[KERNEL] No plugin for direct message: " + targetId);
-            }
+        if (event.type().startsWith(EventTypes.MESSAGE_PREFIX)) {
+            routeDirectMessage(event, json);
             return;
         }
+        if (runInterceptors(event, json)) return;
+        broadcast(event, json, source);
+    }
 
-        // Return routing via pendingRoutes (capability.result/error only — spec-defined).
-        if ("capability.result".equals(type) || "capability.error".equals(type)) {
-            String corrId = event.correlationId();
-            if (corrId != null) {
-                // Call interceptors for results before returning (allows IdempotencyInterceptor to cache/distribute)
-                var chain = interceptors;
-                if (chain != null) {
-                    for (var ix : chain) {
-                        try {
-                            if (ix.intercept(event, json)) return;
-                        } catch (Exception e) {
-                            System.err.println("[KERNEL] Interceptor error on result: " + e.getMessage());
-                        }
-                    }
-                }
-                String targetPluginId = pendingRoutes.remove(corrId);
-                if (targetPluginId != null) {
-                    Connection target = byPluginId.get(targetPluginId);
-                    if (target != null) {
-                        System.out.println("[KERNEL] route " + type + " corrId=" + corrId + " → " + targetPluginId);
-                        enqueue(target, json);
-                        return;
-                    }
-                }
-            }
-            System.out.println("[KERNEL] No pending route for " + type + " corrId=" + event.correlationId());
-            return;
+    private void routeDirectMessage(KernelEvent event, String json) {
+        String targetId = event.type().substring(EventTypes.MESSAGE_PREFIX.length());
+        Connection target = findConnection(targetId);
+        if (target != null) {
+            System.out.println("[KERNEL] direct " + event.type() + " → " + targetId);
+            enqueue(target, json);
+        } else {
+            System.err.println("[KERNEL] No plugin for direct message: " + targetId);
         }
+    }
 
-        // Track senders for return routing (pendingRoutes — capability.invoke only).
-        if ("capability.invoke".equals(type)) {
-            String corrId = event.correlationId();
-            if (corrId != null && source.pluginId != null) {
-                pendingRoutes.put(corrId, source.pluginId);
-                System.out.println("[KERNEL] route capability.invoke from=" + source.pluginId + " corrId=" + corrId + " (pending return)");
-            }
-        }
-
-        // [Option B] Interceptor chain — runs after pendingRoutes tracking, before broadcast.
-        // If an interceptor returns true, the event is consumed (no broadcast).
-        // If it returns false, it may have had side-effects but broadcast continues.
-        var chain = interceptors;
-        if (chain != null) {
-            for (var ix : chain) {
-                try {
-                    if (ix.intercept(event, json)) return;
-                } catch (Exception e) {
-                    System.err.println("[KERNEL] Interceptor error on " + type + ": " + e.getMessage());
-                }
-            }
-        }
-
-        // Broadcast: exact match + wildcard prefix match
-        var exact = exactRoutes.get(type);
+    private void broadcast(KernelEvent event, String json, Connection source) {
+        String type  = event.type();
+        var    exact = exactRoutes.get(type);
         if (exact != null) exact.forEach(c -> enqueue(c, json));
 
+        int prefixCount = 0;
         for (PrefixRoute pr : prefixRoutes) {
-            if (type.startsWith(pr.prefix())) enqueue(pr.conn(), json);
+            if (type.startsWith(pr.prefix())) { enqueue(pr.conn(), json); prefixCount++; }
         }
 
-        boolean hasSubscribers = (exact != null && !exact.isEmpty())
-                || prefixRoutes.stream().anyMatch(pr -> type.startsWith(pr.prefix()));
-        if (hasSubscribers) {
-            // Only trace high-value event types, skip log.* and chat.typing noise
-            if (!type.startsWith("log.") && !"chat.typing".equals(type)) {
-                int count = (exact != null ? exact.size() : 0)
-                        + (int) prefixRoutes.stream().filter(pr -> type.startsWith(pr.prefix())).count();
-                System.out.println("[KERNEL] broadcast " + type + " from=" + source.pluginId + " → " + count + " subscriber(s)");
-            }
-        } else if (!type.startsWith("plugin.")
-                && !"capability.register".equals(type)) {
-            // capability.register is handled in-process by CapabilityInterceptor (side-effect, no UDS subscribers
-            // after CapabilityRegistry was removed). All other events without subscribers are worth logging.
+        int total = (exact != null ? exact.size() : 0) + prefixCount;
+        if (total > 0)
+            System.out.println("[KERNEL] broadcast " + type + " from=" + source.pluginId + " → " + total + " subscriber(s)");
+        else
             System.out.println("[KERNEL] No subscribers for: " + type);
+    }
+
+    // ── Interceptor chain ─────────────────────────────────────────────────────
+
+    private boolean runInterceptors(KernelEvent event, String json) {
+        var chain = interceptors;
+        if (chain == null) return false;
+        for (var ix : chain) {
+            try {
+                if (ix.intercept(event, json)) return true;
+            } catch (Exception e) {
+                System.err.println("[KERNEL] Interceptor error on " + event.type() + ": " + e.getMessage());
+            }
         }
+        return false;
     }
 
     // ── Writer queue ──────────────────────────────────────────────────────────
 
     void enqueue(Connection conn, String json) {
         try {
-            byte[] frame = buildFrame(json);
-            conn.writeQueue.put(frame);
+            conn.writeQueue.put(buildFrame(json));
         } catch (InterruptedException e) {
             Thread.currentThread().interrupt();
         }
     }
 
     static byte[] buildFrame(String json) {
-        byte[] payload = json.getBytes(java.nio.charset.StandardCharsets.UTF_8);
-        int len = payload.length;
-        byte[] frame = new byte[4 + len];
-        frame[0] = (byte)(len >>> 24); frame[1] = (byte)(len >>> 16);
-        frame[2] = (byte)(len >>> 8);  frame[3] = (byte) len;
-        System.arraycopy(payload, 0, frame, 4, len);
-        return frame;
+        byte[] payload = json.getBytes(UTF8);
+        return ByteBuffer.allocate(4 + payload.length)
+                .putInt(payload.length)
+                .put(payload)
+                .array();
     }
 
-    // ── Project root discovery (Option B) ─────────────────────────────────────
+    // ── Service accessors (used by KernelBusImpl) ─────────────────────────────
 
-    /**
-     * Walks up from user.dir until a directory that contains a 'kernel/' subdirectory
-     * or a 'Start.java' file is found. Same heuristic used by MK7's Boot.java and
-     * CapabilityRegistry.findProjectRoot().
-     *
-     * Falls back to user.dir if nothing is found (e.g., when run from kernel/ directly).
-     */
+    Connection findConnection(String pluginId) { return byPluginId.get(pluginId); }
+
+    // ── Project root discovery ────────────────────────────────────────────────
+
     Path findProjectRoot() {
-        Path p = Path.of(System.getProperty("user.dir")).toAbsolutePath().normalize();
-        while (p != null) {
-            if (Files.exists(p.resolve("kernel")) || Files.exists(p.resolve("Start.java"))) {
-                return p;
-            }
-            p = p.getParent();
-        }
-        // Fallback: if kernel/ is the cwd (jbang run from inside kernel/), go one level up
         Path cwd = Path.of(System.getProperty("user.dir")).toAbsolutePath().normalize();
-        if (cwd.getFileName().toString().equals("kernel")) return cwd.getParent();
-        return cwd;
+        for (Path p = cwd; p != null; p = p.getParent()) {
+            if (Files.exists(p.resolve("kernel")) || Files.exists(p.resolve("Start.java")))
+                return p;
+        }
+        return cwd.getFileName().toString().equals("kernel") ? cwd.getParent() : cwd;
     }
+}
+
+// ── Event type constants ──────────────────────────────────────────────────────
+
+interface EventTypes {
+    String PLUGIN_REGISTER = "plugin.register";
+    String MESSAGE_PREFIX  = "message.";
 }
 
 // ── Connection (pluginId + channel + dedicated writer thread) ─────────────────
@@ -316,7 +275,6 @@ class Connection {
     Connection(String pluginId, SocketChannel channel) {
         this.pluginId = pluginId;
         this.channel  = channel;
-        // Guard: do not start writer thread for synthetic connections (e.g., KERNEL_SOURCE)
         if (channel != null) Thread.ofVirtual().start(this::runWriter);
     }
 
@@ -329,7 +287,11 @@ class Connection {
                 out.write(frame);
                 out.flush();
             }
-        } catch (Exception ignored) {}
+        } catch (IOException e) {
+            // expected on disconnect — channel closed by handleClient
+        } catch (Exception e) {
+            System.err.println("[KERNEL] Writer error for " + pluginId + ": " + e.getMessage());
+        }
     }
 
     void shutdown() {
@@ -339,24 +301,7 @@ class Connection {
 
 record PrefixRoute(String prefix, Connection conn) {}
 
-/**
- * CatalogEntry — one entry per capability declaration found in plugin.json.
- * Defined here (not inside PluginManager) so CapabilityInterceptor can reference it
- * without coupling to PluginManager at all.
- */
-record CatalogEntry(
-        String   pluginId,
-        String   pluginDir,
-        String   capabilityName,
-        String   triggerEvent,       // null for agents (no triggerEvent field)
-        boolean  onDemand,           // lifecycle.mode == "on-demand"
-        boolean  persistent,         // lifecycle.mode == "persistent"
-        double   bidWeight,
-        int      idleTimeoutSeconds,
-        String[] launchCommand       // full launch.command array (e.g. ["jbang", "Tool.java"])
-) {}
-
-// ── Option B interfaces and implementations ───────────────────────────────────
+// ── Kernel extension interfaces ───────────────────────────────────────────────
 
 /**
  * EventInterceptor — called by Kernel.route() before the broadcast phase.
@@ -364,9 +309,6 @@ record CatalogEntry(
  * Return semantics:
  *   true  → event CONSUMED: stop chain, skip broadcast entirely.
  *   false → side-effect only: chain continues; event is broadcast normally afterward.
- *
- * Exceptions thrown by intercept() are caught by route() and logged; they do NOT
- * propagate and do NOT prevent subsequent interceptors or the broadcast from running.
  */
 interface EventInterceptor {
     boolean intercept(KernelEvent event, String json) throws Exception;
@@ -374,35 +316,12 @@ interface EventInterceptor {
 
 /**
  * KernelBus — minimal surface for interceptors to emit events back into the kernel.
- *
- * sendTo:             enqueues JSON directly to a plugin connection (bypasses routing).
- * route:              sends an event through the full Kernel pipeline (pendingRoutes + interceptors + broadcast).
- * removePendingRoute: removes a correlationId from the return-routing table (used by IdempotencyInterceptor
- *                     after it manually delivers a result, to prevent memory leaks).
  */
 interface KernelBus {
     void sendTo(String pluginId, String json);
     void route(KernelEvent event) throws Exception;
-    void removePendingRoute(String corrId);
-}
-
-/**
- * PluginRuntime — contract between CapabilityInterceptor and PluginManager.
- *
- * Exposes catalog lookups (what exists on disk) and lifecycle operations
- * (spawn, track, list) through a single interface. CapabilityInterceptor depends
- * only on this contract; PluginManager is never referenced directly.
- */
-interface PluginRuntime {
-    // Catalog
-    void awaitReady(long timeoutMs);
-    CatalogEntry getByCapName(String capName);
-    Collection<CatalogEntry> allEntries();
-    void refresh();
-    // Lifecycle
-    void spawnOnDemand(String capabilityName) throws Exception;
-    void trackUsage(String capabilityName);
-    String listPlugins() throws Exception;
+    void addPendingRoute(String corrId, String sourcePluginId);
+    String removePendingRoute(String corrId);
 }
 
 /** Concrete KernelBus backed by a Kernel instance. */
@@ -415,21 +334,24 @@ class KernelBusImpl implements KernelBus {
 
     @Override
     public void sendTo(String pluginId, String json) {
-        Connection c = kernel.byPluginId.get(pluginId);
+        Connection c = kernel.findConnection(pluginId);
         if (c != null) kernel.enqueue(c, json);
         else System.err.println("[KERNEL-BUS] No connection for direct send: " + pluginId);
     }
 
     @Override
     public void route(KernelEvent event) throws Exception {
-        // Re-serialise the event and push through the full routing pipeline.
-        // KERNEL_SOURCE is used so pendingRoutes can record "kernel" as the sender.
         String json = KernelEvent.MAPPER.writeValueAsString(event);
         kernel.route(event, json, kernel.KERNEL_SOURCE);
     }
 
     @Override
-    public void removePendingRoute(String corrId) {
-        kernel.pendingRoutes.remove(corrId);
+    public void addPendingRoute(String corrId, String sourcePluginId) {
+        kernel.pendingRoutes.put(corrId, sourcePluginId);
+    }
+
+    @Override
+    public String removePendingRoute(String corrId) {
+        return kernel.pendingRoutes.remove(corrId);
     }
 }

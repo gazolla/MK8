@@ -11,7 +11,7 @@ import java.util.stream.Stream;
  * PluginManager — Plugin discovery, catalog indexing, and process lifecycle management.
  *
  * Combines static manifest scanning with dynamic process orchestration into a unified
- * runtime engine implementing PluginRuntime. At boot, a virtual thread scans the
+ * runtime engine implementing PluginResolver. At boot, a virtual thread scans the
  * project root for plugin.json files, building a capability catalog of all available
  * services. It can dynamically hot-reload the catalog on plugin.installed events.
  *
@@ -22,11 +22,9 @@ import java.util.stream.Stream;
  * every 60 seconds to terminate on-demand processes that have exceeded their idle limit.
  * Ensures full thread safety across concurrent readers and dynamic process mutations.
  */
-class PluginManager implements PluginRuntime {
+class PluginManager implements PluginResolver {
 
     // ── Managed process ───────────────────────────────────────────────────────
-    // CatalogEntry is defined in Kernel.java (top-level record) so CapabilityInterceptor
-    // can reference it without importing PluginManager.
 
     record ManagedProcess(String pluginId, long pid, Path pluginDir, Process process) {}
 
@@ -61,7 +59,7 @@ class PluginManager implements PluginRuntime {
         scheduler.scheduleAtFixedRate(this::checkIdlePlugins, 60, 60, TimeUnit.SECONDS);
     }
 
-    // ── PluginRuntime: catalog ────────────────────────────────────────────────
+    // ── PluginResolver: catalog ────────────────────────────────────────────────
 
     @Override
     public void awaitReady(long timeoutMs) {
@@ -86,7 +84,7 @@ class PluginManager implements PluginRuntime {
         scan();
     }
 
-    // ── PluginRuntime: lifecycle ──────────────────────────────────────────────
+    // ── PluginResolver: lifecycle ──────────────────────────────────────────────
 
     @Override
     public void trackUsage(String capName) {
