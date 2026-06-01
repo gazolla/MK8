@@ -1,0 +1,82 @@
+{
+  "id": "assistant",
+  "type": "agent",
+  "version": "1.0.0",
+  "description": "Persistent conversational assistant. Handles chat, delegates to specialists.",
+  "lifecycle": {
+    "mode": "persistent"
+  },
+  "llm": {
+    "model": "google/gemini-3.5-flash",
+    "baseUrl": "https://openrouter.ai/api/v1",
+    "apiKeyEnv": "OPENROUTER_API_KEY",
+    "maxTokens": 8192,
+    "temperature": 0.3
+  },
+  "agent": {
+    "maxRounds": 7,
+    "maxDelegations": 3,
+    "maxToolCalls": 10,
+    "maxConcurrentMissions": 5,
+    "negotiatingTimeoutSeconds": 120
+  },
+  "thinking": {
+    "background": "⏳ Still working on it. I'll notify you here when ready! 🔔"
+  },
+  "capabilities": [
+    {
+      "name": "chat.respond",
+      "description": "Respond to a user chat message.",
+      "version": "1.0.0",
+      "replyEvent": "chat.response",
+      "inputSchema": {
+        "required": [
+          "message"
+        ],
+        "properties": {
+          "message": {
+            "type": "string"
+          }
+        }
+      },
+      "outputSchema": {
+        "properties": {
+          "response": {
+            "type": "string"
+          }
+        }
+      },
+      "exclusive": false,
+      "bidWeight": 1.0,
+      "tags": [
+        "chat",
+        "assistant"
+      ],
+      "internal": true
+    }
+  ],
+  "subscribes": [
+    "chat.prompt",
+    "message.assistant",
+    "capability.result",
+    "system.error",
+    "plugin.installed"
+  ],
+  "publishes": [
+    "chat.response",
+    "chat.typing",
+    "chat.thinking",
+    "capability.register",
+    "capability.invoke",
+    "capability.result"
+  ],
+  "launch": {
+    "name": "Assistant",
+    "command": [
+      "jbang",
+      "Agent.java"
+    ],
+    "order": 40,
+    "delayAfterMs": 300
+  }
+}

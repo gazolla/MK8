@@ -1,0 +1,19 @@
+{
+  "id": "consumer",
+  "type": "system",
+  "version": "1.0.0",
+  "description": "Consumes data.item events and reports when the stream is complete.",
+  "lifecycle": {
+    "mode": "persistent"
+  },
+  "launch": {
+    "name": "Consumer",
+    "command": ["jbang", "Consumer.java"],
+    "order": 10
+  },
+  "capabilities": [],
+  "subscribes": [
+    "data.item",
+    "data.done"
+  ]
+}

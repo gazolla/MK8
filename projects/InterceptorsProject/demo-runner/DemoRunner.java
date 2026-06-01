@@ -2,9 +2,9 @@
 //JAVA 21+
 //DEPS com.fasterxml.jackson.core:jackson-databind:2.17.2
 //DEPS com.fasterxml.jackson.datatype:jackson-datatype-jsr310:2.17.2
-//SOURCES ../../kernel/KernelEvent.java
-//SOURCES ../../kernel/PluginConfig.java
-//SOURCES ../../kernel/PluginBase.java
+//SOURCES ../../../kernel/KernelEvent.java
+//SOURCES ../../../kernel/interceptors/plugin/PluginConfig.java
+//SOURCES ../../../kernel/interceptors/plugin/PluginBase.java
 
 import com.fasterxml.jackson.databind.JsonNode;
 import java.io.OutputStream;
@@ -27,6 +27,31 @@ import java.util.concurrent.*;
  * real-time process IDs of on-demand tools started by the Kernel during the run.
  */
 public class DemoRunner {
+
+    // ── Event type constants ──────────────────────────────────────────────────
+    static final String EVT_PLUGIN_READY     = "plugin.ready";
+    static final String EVT_CAPABILITY_RESULT  = "capability.result";
+    static final String EVT_CAPABILITY_ERROR   = "capability.error";
+    static final String EVT_PLUGIN_SPAWNED     = "system.plugin.spawned";
+
+    // ── Plugin / session identity ─────────────────────────────────────────────
+    static final String SOURCE_ID          = "demo-runner";
+    static final String SESSION_ID         = "demo-session";
+    static final String CAPABILITY_ANALYZE = "text.analyze";
+
+    // ── Test fixture ──────────────────────────────────────────────────────────
+    static final String HAIKU_CORR_ID = "haiku-collapsed-id";
+    static final String HAIKU_LABEL   = "haiku_collapsed";
+    static final String HAIKU_TEXT    =
+            "An old silent pond a frog jumps into the pond splash silence again.";
+
+    // ── Timing ────────────────────────────────────────────────────────────────
+    static final long AGENT_WARMUP_MS  = 1_500;
+    static final long LATCH_TIMEOUT_S  = 30;
+    static final long CACHE_TEST_DELAY_MS = 1_000;
+
+    // ── Result count ──────────────────────────────────────────────────────────
+    static final int EXPECTED_RESULTS = 3;
 
     // Tracks in-flight requests: correlationId → sample label
     final ConcurrentHashMap<String, String> pending = new ConcurrentHashMap<>();
@@ -51,7 +76,7 @@ public class DemoRunner {
     };
 
     // Counts how many results we've received (2 for collapsing, 1 for sequential cache hit)
-    final CountDownLatch latch = new CountDownLatch(3);
+    final CountDownLatch latch = new CountDownLatch(EXPECTED_RESULTS);
 
     // Safeguard to ensure the test suite is executed exactly once
     private final java.util.concurrent.atomic.AtomicBoolean testStarted =
@@ -74,10 +99,10 @@ public class DemoRunner {
     void handle(String json, OutputStream out) throws Exception {
         KernelEvent event = KernelEvent.MAPPER.readValue(json, KernelEvent.class);
         switch (event.type()) {
-            case "plugin.ready"          -> handleReady(event, out);
-            case "capability.result"     -> handleResult(event, out);
-            case "capability.error"      -> handleError(event, out);
-            case "system.plugin.spawned" -> handleSpawned(event, out);
+            case EVT_PLUGIN_READY      -> handleReady(event, out);
+            case EVT_CAPABILITY_RESULT -> handleResult(event, out);
+            case EVT_CAPABILITY_ERROR  -> handleError(event, out);
+            case EVT_PLUGIN_SPAWNED    -> handleSpawned(event, out);
         }
     }
 
@@ -89,14 +114,14 @@ public class DemoRunner {
             return;
         }
 
-        // Give SummaryAgent 1.5 seconds to connect and register before we start sending
+        // Give SummaryAgent time to connect and register before we start sending
         Thread.ofVirtual().start(() -> {
             try {
-                Thread.sleep(1500);
+                Thread.sleep(AGENT_WARMUP_MS);
                 sendAllRequests(out);
 
-                // Wait for all results (timeout 30s)
-                if (!latch.await(30, TimeUnit.SECONDS)) {
+                // Wait for all results
+                if (!latch.await(LATCH_TIMEOUT_S, TimeUnit.SECONDS)) {
                     System.err.println("\n[DEMO] Timeout: not all results received.");
                     System.exit(1);
                 } else {
@@ -144,29 +169,25 @@ public class DemoRunner {
 
     void sendAllRequests(OutputStream out) throws Exception {
         System.out.println("[DEMO] === STARTING IDEMPOTENCY & COLLAPSING TEST ===\n");
-        String label = "haiku_collapsed";
-        String text  = "An old silent pond a frog jumps into the pond splash silence again.";
-        String corrId = "haiku-collapsed-id";
-
-        pending.put(corrId, label);
+        pending.put(HAIKU_CORR_ID, HAIKU_LABEL);
 
         String payload = KernelEvent.MAPPER.writeValueAsString(Map.of(
-                "name", "text.analyze",
-                "text", text));
+                "name", CAPABILITY_ANALYZE,
+                "text", HAIKU_TEXT));
 
         // 1. Send concurrent request #1
         PluginBase.publish(
                 KernelEvent.withCorrelation("capability.invoke", payload,
-                        "demo-runner", corrId, "demo-session"),
+                        SOURCE_ID, HAIKU_CORR_ID, SESSION_ID),
                 out);
-        System.out.println("[DEMO] → Sent concurrent request #1 corrId=" + corrId);
+        System.out.println("[DEMO] → Sent concurrent request #1 corrId=" + HAIKU_CORR_ID);
 
         // 2. Send duplicate concurrent request #2 instantly
         PluginBase.publish(
                 KernelEvent.withCorrelation("capability.invoke", payload,
-                        "demo-runner", corrId, "demo-session"),
+                        SOURCE_ID, HAIKU_CORR_ID, SESSION_ID),
                 out);
-        System.out.println("[DEMO] → Sent concurrent request #2 (duplicate) corrId=" + corrId);
+        System.out.println("[DEMO] → Sent concurrent request #2 (duplicate) corrId=" + HAIKU_CORR_ID);
         System.out.println("[DEMO] Both requests in-flight. Waiting for collapsing...\n");
     }
 
@@ -198,18 +219,18 @@ public class DemoRunner {
         if (currentCount == 2) {
             Thread.ofVirtual().start(() -> {
                 try {
-                    Thread.sleep(1000); // Wait a bit for everything to stabilize
+                    Thread.sleep(CACHE_TEST_DELAY_MS);
                     System.out.println("[DEMO] === RUNNING SEQUENTIAL CACHE HIT TEST ===");
-                    System.out.println("[DEMO] Sending duplicate request #3 sequentially (corrId=" + corrId + ")...");
-                    
+                    System.out.println("[DEMO] Sending duplicate request #3 sequentially (corrId=" + HAIKU_CORR_ID + ")...");
+
                     String payload = KernelEvent.MAPPER.writeValueAsString(Map.of(
-                            "name", "text.analyze",
-                            "text", "An old silent pond a frog jumps into the pond splash silence again."));
-                    
+                            "name", CAPABILITY_ANALYZE,
+                            "text", HAIKU_TEXT));
+
                     long start = System.currentTimeMillis();
                     PluginBase.publish(
                             KernelEvent.withCorrelation("capability.invoke", payload,
-                                    "demo-runner", corrId, "demo-session"),
+                                    SOURCE_ID, HAIKU_CORR_ID, SESSION_ID),
                             out);
                     System.out.println("[DEMO] → Sent sequential request #3 in " + (System.currentTimeMillis() - start) + "ms");
                 } catch (Exception e) {

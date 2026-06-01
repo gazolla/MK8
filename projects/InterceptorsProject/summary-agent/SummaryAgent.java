@@ -2,9 +2,9 @@
 //JAVA 21+
 //DEPS com.fasterxml.jackson.core:jackson-databind:2.17.2
 //DEPS com.fasterxml.jackson.datatype:jackson-datatype-jsr310:2.17.2
-//SOURCES ../../kernel/KernelEvent.java
-//SOURCES ../../kernel/PluginConfig.java
-//SOURCES ../../kernel/PluginBase.java
+//SOURCES ../../../kernel/KernelEvent.java
+//SOURCES ../../../kernel/interceptors/plugin/PluginConfig.java
+//SOURCES ../../../kernel/interceptors/plugin/PluginBase.java
 
 import com.fasterxml.jackson.databind.JsonNode;
 import java.io.OutputStream;
@@ -28,6 +28,19 @@ import java.util.concurrent.*;
  */
 public class SummaryAgent {
 
+    // ── Event type constants ──────────────────────────────────────────────────
+    static final String EVT_ANALYZE_REQUEST  = "message.summary-agent";
+    static final String EVT_CAPABILITY_RESULT = "capability.result";
+    static final String EVT_CAPABILITY_ERROR  = "capability.error";
+
+    // ── Plugin / capability identity ──────────────────────────────────────────
+    static final String SOURCE_ID            = "summary-agent";
+    static final String CAPABILITY_WORDCOUNT = "text.wordcount";
+
+    // ── Vocabulary richness thresholds ────────────────────────────────────────
+    static final double RICHNESS_HIGH = 0.7;
+    static final double RICHNESS_LOW  = 0.4;
+
     // Tracks in-flight tool calls: inner correlationId → outer correlationId + sessionId + original text
     final ConcurrentHashMap<String, PendingAnalysis> pending = new ConcurrentHashMap<>();
 
@@ -47,9 +60,9 @@ public class SummaryAgent {
         KernelEvent event = KernelEvent.MAPPER.readValue(json, KernelEvent.class);
 
         switch (event.type()) {
-            case "message.summary-agent" -> handleAnalyzeRequest(event, out);
-            case "capability.result"     -> handleToolResult(event, out);
-            case "capability.error"      -> handleToolError(event, out);
+            case EVT_ANALYZE_REQUEST   -> handleAnalyzeRequest(event, out);
+            case EVT_CAPABILITY_RESULT -> handleToolResult(event, out);
+            case EVT_CAPABILITY_ERROR  -> handleToolError(event, out);
         }
     }
 
@@ -77,14 +90,14 @@ public class SummaryAgent {
                 event.correlationId(), event.sessionId(), text));
 
         String invokePayload = KernelEvent.MAPPER.writeValueAsString(Map.of(
-                "name", "text.wordcount",
+                "name", CAPABILITY_WORDCOUNT,
                 "text", text));
 
         // CapabilityInterceptor intercepts this → routes to WordCountTool (spawning it on-demand if needed)
-        // pendingRoutes[innerCorrId] = "summary-agent" so the result comes back to us
+        // pendingRoutes[innerCorrId] = SOURCE_ID so the result comes back to us
         PluginBase.publish(
                 KernelEvent.withCorrelation("capability.invoke", invokePayload,
-                        "summary-agent", innerCorrId, event.sessionId()),
+                        SOURCE_ID, innerCorrId, event.sessionId()),
                 out);
 
         System.out.println("[SUMMARY-AGENT] Delegated to text.wordcount corrId=" + innerCorrId);
@@ -113,7 +126,7 @@ public class SummaryAgent {
         String avgWps    = stats.path("avgWordsPerSentence").asText("?");
 
         // Build human-friendly summary
-        String richness = unique > words * 0.7 ? "rich" : unique > words * 0.4 ? "moderate" : "repetitive";
+        String richness = unique > words * RICHNESS_HIGH ? "rich" : unique > words * RICHNESS_LOW ? "moderate" : "repetitive";
         String summary  = String.format(
                 """
                 📄 Text Analysis Report
@@ -151,8 +164,8 @@ public class SummaryAgent {
         String payload = KernelEvent.MAPPER.writeValueAsString(
                 Map.of("result", summary));
         PluginBase.publish(
-                KernelEvent.withCorrelation("capability.result", payload,
-                        "summary-agent", corrId, sessionId),
+                KernelEvent.withCorrelation(EVT_CAPABILITY_RESULT, payload,
+                        SOURCE_ID, corrId, sessionId),
                 out);
         System.out.println("[SUMMARY-AGENT] Result sent corrId=" + corrId);
     }

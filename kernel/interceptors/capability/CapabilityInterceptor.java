@@ -6,6 +6,7 @@ import java.util.concurrent.*;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.CompletableFuture;
 import java.util.stream.Stream;
+import java.util.stream.StreamSupport;
 
 /**
  * CatalogEntry — one entry per capability declaration found in plugin.json.
@@ -22,22 +23,6 @@ record CatalogEntry(
         String[] launchCommand       // full launch.command array (e.g. ["jbang", "Tool.java"])
 ) {}
 
-/**
- * PluginResolver — contract defined by CapabilityInterceptor, implemented by PluginManager.
- *
- * Given a capability name, resolves which plugin handles it and can spawn it on demand.
- * CapabilityInterceptor depends on this interface; PluginManager is never referenced directly.
- */
-interface PluginResolver {
-    void awaitReady(long timeoutMs);
-    CatalogEntry getByCapName(String capName);
-    Collection<CatalogEntry> allEntries();
-    void refresh();
-    void spawnOnDemand(String capabilityName) throws Exception;
-    void trackUsage(String capabilityName);
-    String listPlugins() throws Exception;
-}
-
 /** Checked-exception-safe handler for built-in capability invocations. */
 @FunctionalInterface
 interface BuiltInHandler {
@@ -48,41 +33,39 @@ interface BuiltInHandler {
  * CapabilityInterceptor — Live capability registry, routing broker, and auction engine.
  *
  * Occupies position 1 in the Kernel's interceptor chain (executing after idempotency).
- * It registers capabilities dynamically from plugins, maintaining a mapping of live
- * providers. It routes capability invocations using a three-tier fallback scheme:
- * 1. Single live provider: Direct peer-to-peer delivery or tool trigger routing.
- * 2. Multiple live providers: Holds a 500ms auction using bidWeights and loads.
- * 3. No live provider: Falls back to the PluginResolver catalog to either queue
- *    persistent plugins or spawn on-demand plugins and drain the queue on connect.
- *
- * It also handles built-in capability requests such as "system.capability.list"
- * and "system.plugin.list" locally in-process without routing to external plugins.
- * Cleans up registrations automatically if "system.plugin.died" is received.
+ * Maintains a local catalog populated via system.catalog.entry events from PluginManager —
+ * zero direct dependency on PluginManager. Communicates via events only:
+ *   system.catalog.entry/ready → received, builds localCatalog
+ *   system.plugin.spawn/usage  → published, PluginManager handles
  */
 class CapabilityInterceptor implements EventInterceptor {
 
-    // ── Constants ─────────────────────────────────────────────────────────────
+    // ── Eventos que publica ───────────────────────────────────────────────────
+    private static final String EVT_RESULT          = "capability.result";
+    private static final String EVT_ERROR           = "capability.error";
+    private static final String EVT_BID_REQUEST     = "capability.bid.request";
+    private static final String EVT_PLUGIN_SPAWN    = "system.plugin.spawn";
+    private static final String EVT_PLUGIN_USAGE    = "system.plugin.usage";
+    private static final String EVT_CATALOG_REFRESH = "system.catalog.refresh";
 
-    private static final String SOURCE_KERNEL      = "kernel";
-    private static final long   AUCTION_TIMEOUT_MS = 500;
-    private static final long   CATALOG_AWAIT_MS   = 500;
-
-    // Event types
+    // ── Eventos que subscreve ─────────────────────────────────────────────────
     private static final String EVT_INVOKE         = "capability.invoke";
-    private static final String EVT_RESULT         = "capability.result";
-    private static final String EVT_ERROR          = "capability.error";
     private static final String EVT_REGISTER       = "capability.register";
     private static final String EVT_UNREGISTER     = "capability.unregister";
-    private static final String EVT_BID_REQUEST    = "capability.bid.request";
     private static final String EVT_BID_RESPONSE   = "capability.bid.response";
     private static final String EVT_QUERY          = "capability.query";
     private static final String EVT_QUERY_RESULT   = "capability.query.result";
+    private static final String EVT_CATALOG_ENTRY  = "system.catalog.entry";
+    private static final String EVT_CATALOG_READY  = "system.catalog.ready";
     private static final String EVT_PLUGIN_DIED    = "system.plugin.died";
     private static final String EVT_PLUGIN_STOPPED = "system.plugin.stopped";
-    private static final String EVT_INSTALLED      = "plugin.installed";
-    private static final String MSG_PREFIX         = "message.";
 
-    // JSON field keys
+    // ── Internos de roteamento ────────────────────────────────────────────────
+    private static final String CAP_PREFIX = "capability.";
+    private static final String MSG_PREFIX = "message.";
+    private static final String CAP_LIST   = "system.capability.list";
+
+    // JSON field keys — eventos de capability
     private static final String F_NAME             = "name";
     private static final String F_PLUGIN_ID        = "pluginId";
     private static final String F_AGENT_ID         = "agentId";
@@ -93,9 +76,22 @@ class CapabilityInterceptor implements EventInterceptor {
     private static final String F_SCORE            = "score";
     private static final String F_LOAD             = "load";
 
-    // Built-in capability names
-    private static final String CAP_LIST           = "system.capability.list";
-    private static final String PLUGIN_LIST        = "system.plugin.list";
+    // JSON field keys — payload de system.catalog.entry
+    private static final String FC_PLUGIN_ID       = "pluginId";
+    private static final String FC_PLUGIN_DIR      = "pluginDir";
+    private static final String FC_CAP_NAME        = "capabilityName";
+    private static final String FC_TRIGGER         = "triggerEvent";
+    private static final String FC_ON_DEMAND       = "onDemand";
+    private static final String FC_PERSISTENT      = "persistent";
+    private static final String FC_BID_WEIGHT      = "bidWeight";
+    private static final String FC_IDLE_TIMEOUT    = "idleTimeoutSeconds";
+    private static final String FC_LAUNCH_CMD      = "launchCommand";
+
+
+    // Configuração
+    private static final long   AUCTION_TIMEOUT_MS = 500;
+    private static final long   CATALOG_AWAIT_MS   = 500;
+    private static final String SOURCE_KERNEL      = "kernel";
 
     // ── Inner types ───────────────────────────────────────────────────────────
 
@@ -118,11 +114,9 @@ class CapabilityInterceptor implements EventInterceptor {
             this.candidates    = List.copyOf(candidates);
         }
 
-        /** Returns true only on the first call — lock-free single-resolve guard. */
         boolean tryResolve() { return resolved.compareAndSet(false, true); }
         boolean isResolved() { return resolved.get(); }
 
-        /** Winner = highest effective score; fallback to first candidate. */
         Optional<Registration> winner() {
             return bids.stream()
                     .max(Comparator.comparingDouble(BidEntry::effective))
@@ -140,25 +134,37 @@ class CapabilityInterceptor implements EventInterceptor {
     private final Map<String, List<Registration>> registrations  = new ConcurrentHashMap<>();
     private final Map<String, List<KernelEvent>>  pendingInvokes = new ConcurrentHashMap<>();
     private final Map<String, AuctionContext>      auctions       = new ConcurrentHashMap<>();
-
-    /** Set once at boot by Kernel — avoids circular dependency at construction. */
-    private volatile PluginResolver runtime;
+    private final ConcurrentHashMap<String, CatalogEntry> localCatalog = new ConcurrentHashMap<>();
+    private final CompletableFuture<Void>          catalogReady   = new CompletableFuture<>();
 
     // ── Construction ──────────────────────────────────────────────────────────
 
     CapabilityInterceptor(KernelBus bus) {
-        this.bus = bus;
-        // Built-in capability names handled in-process. Add new ones here without
-        // touching handleInvoke.
-        this.builtins = Map.of(
-            CAP_LIST,    e -> buildCapabilityList(),
-            PLUGIN_LIST, e -> runtime != null ? runtime.listPlugins() : "[]"
-        );
+        this.bus      = bus;
+        this.builtins = Map.of(CAP_LIST, e -> buildCapabilityList());
     }
 
-    void setRuntime(PluginResolver r) { this.runtime = r; }
+    @Override public Set<String> publishes() {
+        return Set.of(EVT_RESULT, EVT_ERROR, EVT_BID_REQUEST,
+                      EVT_PLUGIN_SPAWN, EVT_PLUGIN_USAGE, EVT_CATALOG_REFRESH);
+    }
+
+    @Override public Set<String> subscribes() {
+        return Set.of(EVT_INVOKE, EVT_REGISTER, EVT_UNREGISTER, EVT_BID_RESPONSE,
+                      EVT_QUERY, EVT_QUERY_RESULT, EVT_CATALOG_ENTRY,
+                      EVT_CATALOG_READY, EVT_PLUGIN_DIED, EVT_PLUGIN_STOPPED);
+    }
 
     // ── EventInterceptor ──────────────────────────────────────────────────────
+
+    @Override
+    public boolean handles(String type) {
+        return type.startsWith(CAP_PREFIX)
+            || type.equals(EVT_CATALOG_ENTRY)
+            || type.equals(EVT_CATALOG_READY)
+            || type.equals(EVT_PLUGIN_DIED)
+            || type.equals(EVT_PLUGIN_STOPPED);
+    }
 
     @Override
     public boolean intercept(KernelEvent event, String json) throws Exception {
@@ -169,10 +175,33 @@ class CapabilityInterceptor implements EventInterceptor {
             case EVT_UNREGISTER                        -> { handleUnregister(event);      yield true;  }
             case EVT_BID_RESPONSE                      -> { handleBidResponse(event);     yield true;  }
             case EVT_QUERY                             -> { handleQuery(event);           yield true;  }
+            case EVT_CATALOG_ENTRY                     -> { handleCatalogEntry(event);    yield false; }
+            case EVT_CATALOG_READY                     -> { catalogReady.complete(null);  yield false; }
             case EVT_PLUGIN_DIED, EVT_PLUGIN_STOPPED   -> { handlePluginDied(event);      yield false; }
-            case EVT_INSTALLED                         -> { handlePluginInstalled();      yield false; }
             default                                    ->                                       false;
         };
+    }
+
+    // ── Catalog local — recebe push do PluginManager ──────────────────────────
+
+    private void handleCatalogEntry(KernelEvent event) throws Exception {
+        JsonNode p       = KernelEvent.MAPPER.readTree(event.payload());
+        JsonNode cmdNode = p.path(FC_LAUNCH_CMD);
+        String[] cmd     = cmdNode.isArray()
+                ? StreamSupport.stream(cmdNode.spliterator(), false)
+                               .map(JsonNode::asText).toArray(String[]::new)
+                : null;
+        var entry = new CatalogEntry(
+                p.path(FC_PLUGIN_ID).asText(),
+                p.path(FC_PLUGIN_DIR).asText(),
+                p.path(FC_CAP_NAME).asText(),
+                p.path(FC_TRIGGER).asText(null),
+                p.path(FC_ON_DEMAND).asBoolean(),
+                p.path(FC_PERSISTENT).asBoolean(),
+                p.path(FC_BID_WEIGHT).asDouble(1.0),
+                p.path(FC_IDLE_TIMEOUT).asInt(300),
+                cmd);
+        localCatalog.put(entry.capabilityName(), entry);
     }
 
     // ── Registration ──────────────────────────────────────────────────────────
@@ -209,7 +238,7 @@ class CapabilityInterceptor implements EventInterceptor {
         String   name   = p.path(F_NAME).asText(null);
         String   plugin = p.path(F_PLUGIN_ID).asText(null);
         if (name == null || plugin == null) return null;
-        String   trigger = p.path(F_TRIGGER).asText(null);
+        String trigger = p.path(F_TRIGGER).asText(null);
         if (trigger != null && trigger.isBlank()) trigger = null;
         return new RegisterPayload(name, plugin, trigger, p.path(F_BID_WEIGHT).asDouble(1.0));
     }
@@ -220,12 +249,11 @@ class CapabilityInterceptor implements EventInterceptor {
         String capName = parseCapabilityName(event);
         if (capName == null) { publishError(event, "missing capability name"); return; }
 
-        // Register caller so capability.result/error can be routed back
         String corrId = event.correlationId();
         if (corrId != null && event.source() != null)
             bus.addPendingRoute(corrId, event.source());
 
-        if (runtime != null) runtime.trackUsage(capName);
+        trackUsage(capName);
         if (handleBuiltIn(capName, event)) return;
 
         List<Registration> providers = registrations.get(capName);
@@ -253,10 +281,18 @@ class CapabilityInterceptor implements EventInterceptor {
         return true;
     }
 
+    private void trackUsage(String capName) {
+        try {
+            String payload = KernelEvent.MAPPER.writeValueAsString(Map.of(F_CAP_NAME, capName));
+            bus.route(KernelEvent.of(EVT_PLUGIN_USAGE, payload, SOURCE_KERNEL));
+        } catch (Exception ignored) {}
+    }
+
     private void handleNoProvider(String capName, KernelEvent event) throws Exception {
-        if (runtime == null) { publishError(event, "no provider for: " + capName); return; }
-        runtime.awaitReady(CATALOG_AWAIT_MS);
-        CatalogEntry entry = runtime.getByCapName(capName);
+        try { catalogReady.get(CATALOG_AWAIT_MS, TimeUnit.MILLISECONDS); }
+        catch (TimeoutException ignored) {}
+
+        CatalogEntry entry = localCatalog.get(capName);
         if (entry == null)                                   { publishError(event, "no provider for: " + capName);
                                                                System.out.println("[CAP-IDX] No provider for: " + capName); return; }
         if (entry.persistent() && entry.triggerEvent() != null) { routePersistent(entry, event); return; }
@@ -271,7 +307,8 @@ class CapabilityInterceptor implements EventInterceptor {
 
     private void queueOnDemand(String capName, KernelEvent event) throws Exception {
         pendingInvokes.computeIfAbsent(capName, k -> new CopyOnWriteArrayList<>()).add(event);
-        runtime.spawnOnDemand(capName);
+        String payload = KernelEvent.MAPPER.writeValueAsString(Map.of(F_CAP_NAME, capName));
+        bus.route(KernelEvent.of(EVT_PLUGIN_SPAWN, payload, SOURCE_KERNEL));
         System.out.println("[CAP-IDX] Queued on-demand invoke for: " + capName);
     }
 
@@ -281,11 +318,8 @@ class CapabilityInterceptor implements EventInterceptor {
         String auctionId = UUID.randomUUID().toString();
         auctions.put(auctionId, new AuctionContext(invokeEvent, providers));
 
-        String bidReq = KernelEvent.MAPPER.writeValueAsString(Map.of(
-                F_CAP_NAME, capName,
-                F_CORR_ID,  auctionId));
-        bus.route(KernelEvent.withCorrelation(EVT_BID_REQUEST, bidReq, SOURCE_KERNEL,
-                auctionId, invokeEvent.sessionId()));
+        String bidReq = KernelEvent.MAPPER.writeValueAsString(Map.of(F_CAP_NAME, capName, F_CORR_ID, auctionId));
+        bus.route(KernelEvent.withCorrelation(EVT_BID_REQUEST, bidReq, SOURCE_KERNEL, auctionId, invokeEvent.sessionId()));
 
         System.out.println("[CAP-IDX] Auction started for " + capName
                 + " (" + providers.size() + " candidates) id=" + auctionId);
@@ -310,7 +344,6 @@ class CapabilityInterceptor implements EventInterceptor {
         System.out.println("[CAP-IDX] Bid from " + agentId + " score=" + score
                 + " load=" + load + " effective=" + String.format("%.3f", score * (1.0 - load)));
 
-        // Early resolve: all candidates have voted
         if (ctx.bids.size() >= ctx.candidates.size()) resolveAuction(aucId);
     }
 
@@ -344,9 +377,7 @@ class CapabilityInterceptor implements EventInterceptor {
     // ── Routing helpers ───────────────────────────────────────────────────────
 
     void routeToProvider(Registration reg, KernelEvent invokeEvent) throws Exception {
-        // Tools have a triggerEvent; agents are reached via direct message routing.
-        String type = reg.triggerEvent() != null ? reg.triggerEvent()
-                                                 : MSG_PREFIX + reg.pluginId();
+        String type = reg.triggerEvent() != null ? reg.triggerEvent() : MSG_PREFIX + reg.pluginId();
         bus.route(forwardAs(invokeEvent, type));
         System.out.println("[CAP-IDX] Route → " + type);
     }
@@ -363,8 +394,7 @@ class CapabilityInterceptor implements EventInterceptor {
                         .map(r -> capEntryMap(e.getKey(), r.pluginId(), r.bidWeight(), true)));
 
         var liveNames = registrations.keySet();
-        Collection<CatalogEntry> catalog = runtime != null ? runtime.allEntries() : List.of();
-        var offline = catalog.stream()
+        var offline = localCatalog.values().stream()
                 .filter(e -> !liveNames.contains(e.capabilityName()))
                 .map(e -> {
                     var m = capEntryMap(e.capabilityName(), e.pluginId(), e.bidWeight(), false);
@@ -373,12 +403,10 @@ class CapabilityInterceptor implements EventInterceptor {
                     return m;
                 });
 
-        return KernelEvent.MAPPER.writeValueAsString(
-                Stream.concat(live, offline).toList());
+        return KernelEvent.MAPPER.writeValueAsString(Stream.concat(live, offline).toList());
     }
 
-    private Map<String, Object> capEntryMap(String capability, String provider,
-                                             double weight, boolean live) {
+    private Map<String, Object> capEntryMap(String capability, String provider, double weight, boolean live) {
         var m = new LinkedHashMap<String, Object>();
         m.put("capability", capability);
         m.put("provider",   provider);
@@ -401,21 +429,13 @@ class CapabilityInterceptor implements EventInterceptor {
             System.out.println("[CAP-IDX] Cleaned registrations for dead plugin: " + pluginId);
     }
 
-    // ── Plugin installed (hot-reload catalog) ─────────────────────────────────
-
-    void handlePluginInstalled() {
-        if (runtime != null) runtime.refresh();
-        System.out.println("[CAP-IDX] Catalog refreshed after plugin.installed");
-    }
-
     // ── capability.query ──────────────────────────────────────────────────────
 
     void handleQuery(KernelEvent event) throws Exception {
         String             capName = event.payload();
         List<Registration> ps      = registrations.getOrDefault(capName, List.of());
         List<String>       ids     = ps.stream().map(Registration::pluginId).toList();
-        String result = KernelEvent.MAPPER.writeValueAsString(
-                Map.of("capability", capName, "providers", ids));
+        String result = KernelEvent.MAPPER.writeValueAsString(Map.of("capability", capName, "providers", ids));
         bus.route(KernelEvent.reply(event, EVT_QUERY_RESULT, result, SOURCE_KERNEL));
     }
 

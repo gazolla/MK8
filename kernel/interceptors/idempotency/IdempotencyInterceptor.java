@@ -20,8 +20,14 @@ import java.util.concurrent.*;
  */
 class IdempotencyInterceptor implements EventInterceptor {
 
-    private static final long CACHE_TTL_MINUTES = 5;
-    private static final int  CORR_ID_LOG_LEN   = 8;
+    // ── Eventos que subscreve ─────────────────────────────────────────────────
+    private static final String EVT_INVOKE = "capability.invoke";
+    private static final String EVT_RESULT = "capability.result";
+    private static final String EVT_ERROR  = "capability.error";
+
+    // ── Configuração
+    private static final long   CACHE_TTL_MINUTES = 5;
+    private static final int    CORR_ID_LOG_LEN   = 8;
 
     // correlationId → cached result/error KernelEvent
     private final Map<String, KernelEvent>        cache    = new ConcurrentHashMap<>();
@@ -39,14 +45,24 @@ class IdempotencyInterceptor implements EventInterceptor {
         this.bus = bus;
     }
 
+    @Override public Set<String> publishes()  { return Set.of(); }
+    @Override public Set<String> subscribes() { return Set.of(EVT_INVOKE, EVT_RESULT, EVT_ERROR); }
+
     // ── EventInterceptor ──────────────────────────────────────────────────────
+
+    @Override
+    public boolean handles(String type) {
+        return type.equals(EVT_INVOKE)
+            || type.equals(EVT_RESULT)
+            || type.equals(EVT_ERROR);
+    }
 
     @Override
     public boolean intercept(KernelEvent event, String json) throws Exception {
         return switch (event.type()) {
-            case "capability.invoke"                      -> handleInvoke(event, json);
-            case "capability.result", "capability.error" -> handleResult(event, json);
-            default                                       -> false;
+            case EVT_INVOKE              -> handleInvoke(event, json);
+            case EVT_RESULT, EVT_ERROR   -> handleResult(event, json);
+            default                      -> false;
         };
     }
 

@@ -1,0 +1,18 @@
+{
+  "id": "producer",
+  "type": "system",
+  "version": "1.0.0",
+  "description": "Produces data.item events after the kernel signals ready.",
+  "lifecycle": {
+    "mode": "persistent"
+  },
+  "launch": {
+    "name": "Producer",
+    "command": ["jbang", "Producer.java"],
+    "order": 20
+  },
+  "capabilities": [],
+  "subscribes": [
+    "plugin.ready"
+  ]
+}

@@ -2,9 +2,9 @@
 //JAVA 21+
 //DEPS com.fasterxml.jackson.core:jackson-databind:2.17.2
 //DEPS com.fasterxml.jackson.datatype:jackson-datatype-jsr310:2.17.2
-//SOURCES ../../kernel/KernelEvent.java
-//SOURCES ../../kernel/PluginConfig.java
-//SOURCES ../../kernel/PluginBase.java
+//SOURCES ../../../kernel/KernelEvent.java
+//SOURCES ../../../kernel/interceptors/plugin/PluginConfig.java
+//SOURCES ../../../kernel/interceptors/plugin/PluginBase.java
 
 import com.fasterxml.jackson.databind.JsonNode;
 import java.io.OutputStream;
@@ -28,6 +28,19 @@ import java.util.stream.Collectors;
  */
 public class WordCountTool {
 
+    // ── Event type constants ──────────────────────────────────────────────────
+    static final String EVT_TRIGGER          = "capability.tool.text.wordcount";
+    static final String EVT_CAPABILITY_RESULT = "capability.result";
+    static final String EVT_CAPABILITY_ERROR  = "capability.error";
+
+    // ── Plugin identity ───────────────────────────────────────────────────────
+    static final String SOURCE_ID     = "word-count";
+
+    // ── Analysis parameters ───────────────────────────────────────────────────
+    static final int    TOP_WORDS_LIMIT     = 5;
+    static final String SENTENCE_SPLIT_REGEX = "[.!?]+";
+    static final String WORD_CLEAN_REGEX    = "[^a-z0-9]";
+
     public static void main(String[] args) throws Exception {
         KernelEvent.initLogging();
         new WordCountTool().start();
@@ -42,7 +55,7 @@ public class WordCountTool {
         KernelEvent event = KernelEvent.MAPPER.readValue(json, KernelEvent.class);
 
         // Only handle our trigger event
-        if (!"capability.tool.text.wordcount".equals(event.type())) return;
+        if (!EVT_TRIGGER.equals(event.type())) return;
 
         JsonNode payload = KernelEvent.MAPPER.readTree(event.payload());
         String   text    = payload.path("text").asText("").trim();
@@ -59,7 +72,7 @@ public class WordCountTool {
         int      wordCount  = tokens.length;
 
         // Sentence count: split on . ! ? (allowing for abbreviations)
-        int sentenceCount = (int) Arrays.stream(text.split("[.!?]+"))
+        int sentenceCount = (int) Arrays.stream(text.split(SENTENCE_SPLIT_REGEX))
                 .map(String::trim)
                 .filter(s -> !s.isBlank())
                 .count();
@@ -67,13 +80,13 @@ public class WordCountTool {
 
         // Unique words (case-insensitive, stripped of punctuation)
         Map<String, Long> freq = Arrays.stream(tokens)
-                .map(t -> t.toLowerCase().replaceAll("[^a-z0-9]", ""))
+                .map(t -> t.toLowerCase().replaceAll(WORD_CLEAN_REGEX, ""))
                 .filter(t -> !t.isBlank())
                 .collect(Collectors.groupingBy(t -> t, Collectors.counting()));
 
         List<Map<String, Object>> topWords = freq.entrySet().stream()
                 .sorted(Map.Entry.<String, Long>comparingByValue().reversed())
-                .limit(5)
+                .limit(TOP_WORDS_LIMIT)
                 .map(e -> Map.<String, Object>of("word", e.getKey(), "count", e.getValue()))
                 .toList();
 
@@ -90,8 +103,8 @@ public class WordCountTool {
 
         // Reply via capability.result — Kernel routes back to caller via pendingRoutes (correlationId)
         PluginBase.publish(
-                KernelEvent.withCorrelation("capability.result", resultPayload,
-                        "word-count", event.correlationId(), event.sessionId()),
+                KernelEvent.withCorrelation(EVT_CAPABILITY_RESULT, resultPayload,
+                        SOURCE_ID, event.correlationId(), event.sessionId()),
                 out);
 
         System.out.println("[WORD-COUNT] Done — words=" + wordCount
@@ -102,8 +115,8 @@ public class WordCountTool {
         try {
             String payload = KernelEvent.MAPPER.writeValueAsString(Map.of("reason", reason));
             PluginBase.publish(
-                    KernelEvent.withCorrelation("capability.error", payload,
-                            "word-count", origin.correlationId(), origin.sessionId()),
+                    KernelEvent.withCorrelation(EVT_CAPABILITY_ERROR, payload,
+                            SOURCE_ID, origin.correlationId(), origin.sessionId()),
                     out);
         } catch (Exception ignored) {}
     }

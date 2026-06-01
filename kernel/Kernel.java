@@ -3,9 +3,11 @@
 //DEPS com.fasterxml.jackson.core:jackson-databind:2.17.2
 //DEPS com.fasterxml.jackson.datatype:jackson-datatype-jsr310:2.17.2
 //SOURCES KernelEvent.java
-//SOURCES PluginManager.java
-//SOURCES CapabilityInterceptor.java
-//SOURCES IdempotencyInterceptor.java
+//SOURCES interceptors/plugin/PluginManager.java
+//SOURCES interceptors/plugin/PluginBase.java
+//SOURCES interceptors/plugin/PluginConfig.java
+//SOURCES interceptors/capability/CapabilityInterceptor.java
+//SOURCES interceptors/idempotency/IdempotencyInterceptor.java
 
 import com.fasterxml.jackson.databind.JsonNode;
 import java.io.IOException;
@@ -32,18 +34,83 @@ import java.util.concurrent.*;
  * It maintains concurrent routing maps for exact, prefix, plugin ID, and pending routes.
  *
  * Events are routed via direct message envelopes or a broadcast pipeline. The Kernel
- * maintains a pluggable list of EventInterceptors (Idempotency and Capability)
- * that run sequentially on inbound invokes. If any interceptor returns true,
- * the event is consumed and routing stops, otherwise standard broadcast takes place.
- * The Kernel dynamically discovers the project root and initializes the PluginManager
- * to coordinate background catalog scanning and process lifecycle events.
+ * maintains a pluggable list of EventInterceptors that run sequentially on inbound
+ * events. If any interceptor returns true the event is consumed and routing stops;
+ * otherwise standard broadcast takes place.
+ *
+ * ── CLI parameters ────────────────────────────────────────────────────────────
+ *
+ *   --socket=<path>
+ *       Unix Domain Socket path the Kernel will bind to.
+ *       Default: /tmp/mk8/kernel.sock (or -Dmk8.socket system property).
+ *       Use distinct paths to run multiple Kernel instances in parallel,
+ *       e.g. for isolated integration tests.
+ *
+ *   --logs=<path>
+ *       Absolute directory where PluginManager writes on-demand plugin logs.
+ *       Default: <project-root>/logs (resolved via findProjectRoot heuristic).
+ *       Pass the project's own logs/ folder so every log lands together.
+ *
+ *   --scan=<path>
+ *       Root directory PluginManager walks to discover plugin.json files.
+ *       Default: auto-detected by walking up from cwd until a folder named
+ *       "kernel" or a file named "Start.java" is found (findProjectRoot).
+ *       Supply an explicit path to eliminate the heuristic entirely.
+ *
+ *   --log-level=DEBUG|INFO|WARN
+ *       Controls verbosity of Kernel stdout messages.
+ *       DEBUG — every routing decision (broadcast targets, direct hops, no-subscribers).
+ *       INFO  — lifecycle events only: startup, registration, shutdown. (default)
+ *       WARN  — silent stdout; errors still appear on stderr.
+ *
+ *   <InterceptorName> ...
+ *       Ordered list of interceptors to install. Any class on the classpath that
+ *       implements EventInterceptor can be named here — no registration required.
+ *       Built-in interceptors:
+ *         IdempotencyInterceptor  — single-flight collapsing + sliding-window cache.
+ *         CapabilityInterceptor   — capability registry and bid-based routing.
+ *         PluginManager           — catalog scan and on-demand process lifecycle.
+ *       Default (no names given): none — Kernel starts as a pure event bus.
+ *
+ * ── Examples ──────────────────────────────────────────────────────────────────
+ *
+ *   # Full stack with explicit paths
+ *   jbang Kernel.java \
+ *     --socket=/tmp/mk8/myapp.sock \
+ *     --logs=/projects/myapp/logs  \
+ *     --scan=/projects/myapp       \
+ *     --log-level=DEBUG            \
+ *     IdempotencyInterceptor CapabilityInterceptor PluginManager
+ *
+ *   # Pure event bus (no args needed)
+ *   jbang Kernel.java --socket=/tmp/mk8/test.sock
  */
 public class Kernel {
 
-    // Socket path — override at runtime with -Dmk8.socket=/path/to/kernel.sock
-    static final Path SOCKET_PATH = Path.of(KernelEvent.DEFAULT_SOCKET);
-
     private static final java.nio.charset.Charset UTF8 = StandardCharsets.UTF_8;
+
+    // ── Log level ─────────────────────────────────────────────────────────────
+
+    enum LogLevel {
+        DEBUG, INFO, WARN;
+
+        static LogLevel of(String s) {
+            return switch (s.toUpperCase()) {
+                case "DEBUG" -> DEBUG;
+                case "WARN"  -> WARN;
+                default      -> INFO;
+            };
+        }
+    }
+
+    static volatile LogLevel LOG_LEVEL = LogLevel.INFO;
+
+    static void log(LogLevel level, String msg) {
+        if (level.ordinal() >= LOG_LEVEL.ordinal()) System.out.println(msg);
+    }
+
+    // ── Socket path (instance — set before start()) ───────────────────────────
+    Path socketPath = Path.of(KernelEvent.DEFAULT_SOCKET);
 
     // ── Instance-owned routing tables ────────────────────────────────────────
     final ConcurrentHashMap<String, CopyOnWriteArrayList<Connection>> exactRoutes  = new ConcurrentHashMap<>();
@@ -65,36 +132,75 @@ public class Kernel {
 
     public static void main(String[] args) throws Exception {
         KernelEvent.initLogging();
-        new Kernel().start();
+        var kernel = new Kernel();
+        var bus    = new KernelBusImpl(kernel);
+
+        // ── Parse flags; remaining positional args are interceptor names ──────
+        Path logsOverride = null;
+        Path scanOverride = null;
+        var  names        = new ArrayList<String>();
+
+        for (String arg : args) {
+            if      (arg.startsWith("--socket="))    kernel.socketPath = Path.of(arg.substring(9));
+            else if (arg.startsWith("--logs="))      logsOverride      = Path.of(arg.substring(7));
+            else if (arg.startsWith("--scan="))      scanOverride      = Path.of(arg.substring(7));
+            else if (arg.startsWith("--log-level=")) LOG_LEVEL         = LogLevel.of(arg.substring(12));
+            else                                     names.add(arg);
+        }
+
+        var config = new KernelConfig(
+                scanOverride != null ? scanOverride : kernel.findProjectRoot(),
+                logsOverride);
+
+        // ── Discover and instantiate interceptors by convention ───────────────
+        // Convention: CLI name = class name; constructor tried in order:
+        //   (KernelBus, KernelConfig) → (KernelBus) → ()
+        // If the instance implements InterceptorLifecycle, onStart() is called.
+        var interceptorList = new ArrayList<EventInterceptor>();
+        for (String name : names) {
+            try {
+                var cls    = Class.forName(name);
+                var iface  = EventInterceptor.class;
+                if (!iface.isAssignableFrom(cls)) {
+                    System.err.println("[KERNEL] " + name + " does not implement EventInterceptor — skipped.");
+                    continue;
+                }
+                var interceptor = instantiate(cls.asSubclass(iface), bus, config);
+                if (interceptor instanceof InterceptorLifecycle lc) lc.onStart();
+                interceptorList.add(interceptor);
+                log(LogLevel.DEBUG, "[KERNEL] Loaded interceptor: " + name);
+            } catch (ClassNotFoundException e) {
+                System.err.println("[KERNEL] Interceptor class not found: '" + name + "'");
+            } catch (Exception e) {
+                System.err.println("[KERNEL] Failed to instantiate '" + name + "': " + e.getMessage());
+            }
+        }
+        kernel.start(interceptorList);
     }
 
-    void start() throws Exception {
-        System.out.println("[KERNEL] Starting MK8...");
+    void start(List<EventInterceptor> interceptorList) throws Exception {
+        this.interceptors = List.copyOf(interceptorList);
+        log(LogLevel.INFO, "[KERNEL] Starting MK8...");
 
-        Files.createDirectories(SOCKET_PATH.getParent());
-        Files.deleteIfExists(SOCKET_PATH);
+        Files.createDirectories(socketPath.getParent());
+        Files.deleteIfExists(socketPath);
 
-        var address = UnixDomainSocketAddress.of(SOCKET_PATH);
+        var address = UnixDomainSocketAddress.of(socketPath);
         try (var server = ServerSocketChannel.open(StandardProtocolFamily.UNIX)) {
             server.bind(address);
-            System.out.println("[KERNEL] Listening at: " + SOCKET_PATH);
+            log(LogLevel.INFO, "[KERNEL] Listening at:  " + socketPath);
+            log(LogLevel.INFO, "[KERNEL] Interceptors:  " + interceptors.stream()
+                    .map(i -> i.getClass().getSimpleName()).toList());
+            interceptors.forEach(i -> {
+                log(LogLevel.DEBUG, "[KERNEL]   " + i.getClass().getSimpleName()
+                        + " publishes="  + i.publishes()
+                        + " subscribes=" + i.subscribes());
+            });
 
             Runtime.getRuntime().addShutdownHook(new Thread(() -> {
-                try { Files.deleteIfExists(SOCKET_PATH); } catch (IOException ignored) {}
-                System.out.println("[KERNEL] Shut down.");
+                try { Files.deleteIfExists(socketPath); } catch (IOException ignored) {}
+                log(LogLevel.INFO, "[KERNEL] Shut down.");
             }));
-
-            Path mk8Root = findProjectRoot();
-            System.out.println("[KERNEL] Project root: " + mk8Root);
-
-            var bus       = new KernelBusImpl(this);
-            var pluginMgr = new PluginManager(bus, mk8Root);
-            Thread.ofVirtual().start(pluginMgr::scan);
-
-            var idempotency = new IdempotencyInterceptor(bus);
-            var capIdx      = new CapabilityInterceptor(bus);
-            capIdx.setRuntime(pluginMgr);
-            interceptors = List.of(idempotency, capIdx); // immutable; written before accept loop
 
             while (!Thread.currentThread().isInterrupted()) {
                 SocketChannel client = server.accept();
@@ -112,7 +218,7 @@ public class Kernel {
             String json;
             while ((json = KernelEvent.readFrame(in)) != null) {
                 KernelEvent event = KernelEvent.MAPPER.readValue(json, KernelEvent.class);
-                if (EventTypes.PLUGIN_REGISTER.equals(event.type())) {
+                if (Events.PLUGIN_REGISTER.equals(event.type())) {
                     conn = register(event, channel);
                 } else if (conn != null) {
                     route(event, json, conn);
@@ -153,7 +259,7 @@ public class Kernel {
             }
         }
 
-        System.out.println("[KERNEL] Registered: " + pluginId
+        log(LogLevel.INFO, "[KERNEL] Registered:   " + pluginId
                 + " subscribes=" + (subs.isArray() ? subs.size() : 0)
                 + " wildcards="  + (wildcards.isArray() ? wildcards.size() : 0));
         return conn;
@@ -165,13 +271,13 @@ public class Kernel {
         prefixRoutes.removeIf(pr -> pr.conn() == conn);
         pendingRoutes.entrySet().removeIf(e -> e.getValue().equals(conn.pluginId));
         conn.shutdown(); // signal writer thread to exit gracefully
-        System.out.println("[KERNEL] Unregistered: " + conn.pluginId);
+        log(LogLevel.INFO, "[KERNEL] Unregistered: " + conn.pluginId);
     }
 
     // ── Routing ───────────────────────────────────────────────────────────────
 
     void route(KernelEvent event, String json, Connection source) {
-        if (event.type().startsWith(EventTypes.MESSAGE_PREFIX)) {
+        if (event.type().startsWith(Events.MESSAGE_PREFIX)) {
             routeDirectMessage(event, json);
             return;
         }
@@ -180,10 +286,10 @@ public class Kernel {
     }
 
     private void routeDirectMessage(KernelEvent event, String json) {
-        String targetId = event.type().substring(EventTypes.MESSAGE_PREFIX.length());
+        String targetId = event.type().substring(Events.MESSAGE_PREFIX.length());
         Connection target = findConnection(targetId);
         if (target != null) {
-            System.out.println("[KERNEL] direct " + event.type() + " → " + targetId);
+            log(LogLevel.DEBUG, "[KERNEL] direct " + event.type() + " → " + targetId);
             enqueue(target, json);
         } else {
             System.err.println("[KERNEL] No plugin for direct message: " + targetId);
@@ -202,9 +308,9 @@ public class Kernel {
 
         int total = (exact != null ? exact.size() : 0) + prefixCount;
         if (total > 0)
-            System.out.println("[KERNEL] broadcast " + type + " from=" + source.pluginId + " → " + total + " subscriber(s)");
+            log(LogLevel.DEBUG, "[KERNEL] broadcast " + type + " from=" + source.pluginId + " → " + total + " subscriber(s)");
         else
-            System.out.println("[KERNEL] No subscribers for: " + type);
+            log(LogLevel.DEBUG, "[KERNEL] No subscribers for: " + type);
     }
 
     // ── Interceptor chain ─────────────────────────────────────────────────────
@@ -213,6 +319,7 @@ public class Kernel {
         var chain = interceptors;
         if (chain == null) return false;
         for (var ix : chain) {
+            if (!ix.handles(event.type())) continue;
             try {
                 if (ix.intercept(event, json)) return true;
             } catch (Exception e) {
@@ -244,6 +351,19 @@ public class Kernel {
 
     Connection findConnection(String pluginId) { return byPluginId.get(pluginId); }
 
+    // ── Convention-based instantiation ────────────────────────────────────────
+
+    static EventInterceptor instantiate(Class<? extends EventInterceptor> cls,
+                                        KernelBus bus, KernelConfig config) throws Exception {
+        try {
+            return cls.getDeclaredConstructor(KernelBus.class, KernelConfig.class).newInstance(bus, config);
+        } catch (NoSuchMethodException ignored) {}
+        try {
+            return cls.getDeclaredConstructor(KernelBus.class).newInstance(bus);
+        } catch (NoSuchMethodException ignored) {}
+        return cls.getDeclaredConstructor().newInstance();
+    }
+
     // ── Project root discovery ────────────────────────────────────────────────
 
     Path findProjectRoot() {
@@ -256,12 +376,24 @@ public class Kernel {
     }
 }
 
-// ── Event type constants ──────────────────────────────────────────────────────
+// ── Convention-over-configuration types ──────────────────────────────────────
 
-interface EventTypes {
-    String PLUGIN_REGISTER = "plugin.register";
-    String MESSAGE_PREFIX  = "message.";
+/**
+ * Resolved path configuration passed to interceptors that need filesystem context.
+ * Interceptors declare this as their second constructor parameter to receive it:
+ *   MyInterceptor(KernelBus bus, KernelConfig config) { ... }
+ */
+record KernelConfig(Path scanRoot, Path logsOverride) {}
+
+/**
+ * Optional lifecycle hook for interceptors that need to start background work
+ * after construction (e.g. launching a scan thread). The Kernel calls onStart()
+ * immediately after instantiation if the interceptor implements this interface.
+ */
+interface InterceptorLifecycle {
+    void onStart();
 }
+
 
 // ── Connection (pluginId + channel + dedicated writer thread) ─────────────────
 
@@ -309,9 +441,20 @@ record PrefixRoute(String prefix, Connection conn) {}
  * Return semantics:
  *   true  → event CONSUMED: stop chain, skip broadcast entirely.
  *   false → side-effect only: chain continues; event is broadcast normally afterward.
+ *
+ * handles() declares which event types this interceptor wants to receive.
+ * The Kernel filters before calling intercept() — return false in handles()
+ * to skip events entirely without entering intercept().
+ *
+ * publishes() / subscribes() declare the interceptor's contract — the event
+ * types it produces and consumes. Used for logging at boot and introspection.
+ * Implement both to make the contract explicit and machine-readable.
  */
 interface EventInterceptor {
     boolean intercept(KernelEvent event, String json) throws Exception;
+    default boolean handles(String eventType) { return true; }
+    default Set<String> publishes()  { return Set.of(); }
+    default Set<String> subscribes() { return Set.of(); }
 }
 
 /**

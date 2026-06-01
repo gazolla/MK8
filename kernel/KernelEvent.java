@@ -173,3 +173,16 @@ public record KernelEvent(
     }
 
 }
+
+/**
+ * Events — Kernel-level routing constants.
+ *
+ * Only the two event types the Kernel itself must recognise to route correctly.
+ * Every other event type belongs to the component that produces it — declared
+ * locally via private constants and exposed through EventInterceptor.publishes()
+ * / subscribes(), or via plugin.json for plugins.
+ */
+interface Events {
+    String PLUGIN_REGISTER = "plugin.register"; // identifies registration frames
+    String MESSAGE_PREFIX  = "message.";        // prefix for direct-message routing
+}
