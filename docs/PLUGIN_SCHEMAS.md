@@ -69,7 +69,7 @@ System plugins contain no `llm`, `agent`, or `capabilities` blocks.
 
 Tool plugins contain no `llm` or `agent` blocks. They contain a `capabilities` block defining `inputSchema` and `outputSchema`.
 
-The lifecycle mode is always `on-demand` accompanied by `idleTimeoutSeconds`. **Tools are not started at boot**. Instead, `PluginManager` spawns them on-demand when `CapabilityInterceptor` calls `runtime.spawnOnDemand()` on the first invocation. A tool must subscribe directly to its own capability `triggerEvent`.
+The lifecycle mode is always `on-demand` accompanied by `idleTimeoutSeconds`. **Tools are not started at boot**. Instead, `PluginManager` spawns them on-demand when `CapabilityInterceptor` broadcasts a `system.plugin.spawn` event on the UDS bus during the first invocation. A tool must subscribe directly to its own capability `triggerEvent`.
 
 ```json
 {
@@ -120,7 +120,7 @@ The lifecycle mode is always `on-demand` accompanied by `idleTimeoutSeconds`. **
 }
 ```
 
-**Tool Routing Rule**: `CapabilityInterceptor` (or `CapabilityInterceptor`) receives a `capability.invoke { name: "tool.filesystem.op" }` event, resolves the associated `triggerEvent`, and re-publishes it as `capability.tool.filesystem.op`. The target tool subscribes to this `triggerEvent` directly rather than to the generic `capability.invoke`.
+**Tool Routing Rule**: `CapabilityInterceptor` receives a `capability.invoke { name: "tool.filesystem.op" }` event, resolves the associated `triggerEvent`, and re-publishes it as `capability.tool.filesystem.op`. The target tool subscribes to this `triggerEvent` directly rather than to the generic `capability.invoke`.
 
 ### Implemented Operations: `tool.filesystem.op`
 

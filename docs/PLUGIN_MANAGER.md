@@ -1,19 +1,20 @@
 # PluginManager Reference
 
-`PluginManager.java` is the single source of truth for plugin discovery and lifecycle in MK8. It merges what were previously two separate classes — `PluginCatalog` (disk scan and capability index) and `ProcessManager` (process spawning, idle-kill, usage tracking) — into one cohesive infrastructure service.
+`PluginManager.java` is the single source of truth for plugin discovery and process lifecycle management in MK8. It implements `EventInterceptor` and `InterceptorLifecycle` to participate directly in the Kernel's event pipeline.
 
-`PluginManager` implements `PluginRuntime`, the interface used by `CapabilityInterceptor` to interact with plugin infrastructure without coupling to this class directly.
+The interceptor operates under virtual thread execution and is completely decoupled from other core components: all communications occur purely via event streams on the UDS bus.
 
 ---
 
 ## 1. Core Responsibilities
 
-1. **Catalog Scan:** Walks the project directory tree at boot (in a virtual thread), reads every `plugin.json`, and populates in-memory lookup maps (`byCapName`, `byPluginId`).
-2. **Hot Refresh:** On `plugin.installed`, re-scans the directory tree synchronously (the catalog is small; a full re-scan is fast).
-3. **On-Demand Spawning:** Launches child processes via `ProcessBuilder` when `CapabilityInterceptor` calls `spawnOnDemand()`. Redirects stdout/stderr to `logs/<pluginId>.log`.
-4. **Idle-Kill:** A background scheduler checks every 60 seconds for on-demand plugins that have been idle longer than their declared `idleTimeoutSeconds` and terminates them.
-5. **Usage Tracking:** `trackUsage(capName)` updates the last-used timestamp so the idle-kill sweep knows a plugin is still active.
-6. **Plugin List:** `listPlugins()` returns a JSON array of running processes and their status (used by `CapabilityInterceptor` to handle `system.capability.list` invocations).
+1. **Dynamic Catalog Scanning:** Walks the project directory recursively at boot inside a virtual thread, parses all `plugin.json` configurations, and indexes capabilities in its internal registry mappings.
+2. **Catalog Sync Broadcasts:** Lacking direct object references, it publishes `system.catalog.entry` events for every capability found, followed by `system.catalog.ready`, notifying `CapabilityInterceptor` to sync its indexes.
+3. **On-Demand Process Spawning:** Intercepts `system.plugin.spawn` events from the bus and launches child processes dynamically via `ProcessBuilder`. Redirects stdout/stderr streams to `logs/<pluginId>.log`.
+4. **Idle-Kill Cleanup:** A background scheduled executor sweeps active on-demand plugins every 60 seconds, terminating processes that have been idle longer than their declared `idleTimeoutSeconds` threshold.
+5. **Usage Tracking:** Intercepts `system.plugin.usage` events from the bus and updates the plugin's last-used timestamp to prevent idle timeouts.
+6. **Routable Plugin List:** Registers `system.plugin.list` as a capability, intercepts `system.plugin.list.request` events, and replies with a serialized JSON list of running processes, PIDs, and idle durations.
+7. **Hot Catalog Reload:** Intercepts `plugin.installed` and `system.catalog.refresh` events to trigger a synchronous directory re-scan in the background.
 
 ---
 
@@ -46,100 +47,67 @@ One entry per running child process.
 
 ---
 
-## 3. PluginRuntime Interface
+## 3. EventInterceptor and InterceptorLifecycle Contract
 
-`CapabilityInterceptor` only interacts with `PluginManager` through `PluginRuntime`. This keeps `CapabilityInterceptor` decoupled from the concrete infrastructure class.
+`PluginManager` implements both core interfaces to integrate seamlessly with the dynamic Kernel:
 
-```java
-interface PluginRuntime {
-    // Catalog
-    void awaitReady(long timeoutMs);
-    PluginManager.CatalogEntry getByCapName(String capName);
-    Collection<PluginManager.CatalogEntry> allEntries();
-    void refresh();
-    // Lifecycle
-    void spawnOnDemand(String capabilityName) throws Exception;
-    void trackUsage(String capabilityName);
-    String listPlugins() throws Exception;
-}
-```
+### `void onStart()`
+* **Description:** Initiated by the Kernel immediately after construction. Launches the initial asynchronous catalog directory `scan()` in a dedicated Virtual Thread.
+
+### `boolean handles(String type)`
+* **Description:** Pre-filters events. Returns `true` for lifecycle and catalog requests (`system.plugin.spawn`, `system.plugin.usage`, `system.catalog.refresh`, `plugin.installed`, `system.plugin.list.request`).
+
+### `boolean intercept(KernelEvent event, String json) throws Exception`
+* **Description:** Entry point for UDS frame processing. Returns `true` (consumed) for `system.plugin.spawn` and `system.plugin.list.request`, and `false` (side-effects only) for others.
 
 ---
 
 ## 4. API Reference
 
-### Catalog Methods
+### Catalog Management
 
-#### `void awaitReady(long timeoutMs)`
-Blocks until the initial `scan()` completes (or the timeout elapses). Called by `spawnOnDemand()` internally to ensure the catalog is populated before a lookup.
-
-#### `CatalogEntry getByCapName(String capName)`
-Returns the `CatalogEntry` for the given capability name, or `null` if not found.
-
-#### `Collection<CatalogEntry> allEntries()`
-Returns an unmodifiable view of all indexed capabilities.
-
-#### `void refresh()`
-Clears and rebuilds both index maps. Triggered by `plugin.installed` events.
+#### `void scan()`
+* **Description:** Recursive directory walker. Excludes the `/kernel` path, parses `plugin.json` structures, populates indexes, publishes `system.catalog.entry` events for every capability, registers `system.plugin.list` capability, and broadcasts `system.catalog.ready` upon completion.
 
 ---
 
-### Lifecycle Methods
+### Process Lifecycle Management
 
 #### `void spawnOnDemand(String capName)`
-Spawns the on-demand plugin that provides `capName`.
-
-1. Calls `awaitReady(500)` to ensure the catalog is ready.
-2. Looks up the `CatalogEntry`; returns immediately if the entry is missing or not `onDemand`.
-3. If the plugin is already in `managed`, publishes `system.plugin.spawned` and returns (idempotent — used to drain `pendingInvokes` in `CapabilityInterceptor`).
-4. Guards against double-spawn using the `spawning` set.
-5. Builds `ProcessBuilder` from `entry.launchCommand()`, sets the working directory to `pluginDir`, and redirects both stdout and stderr to `logs/<pluginId>.log`.
-6. Stores the `ManagedProcess` in `managed`, updates `lastUsed`, and publishes `system.plugin.spawned`.
-7. Registers a `process.onExit()` callback that publishes `system.plugin.died` if the process exits unexpectedly.
-
-#### `void trackUsage(String capName)`
-Updates the `lastUsed` timestamp for the plugin that provides `capName`. Called by `CapabilityInterceptor.handleInvoke()` after routing a request to an already-running plugin.
-
-#### `String listPlugins()`
-Returns a JSON array of maps, one per managed process, with fields:
-- `pluginId` — plugin identifier
-- `pid` — OS process ID
-- `alive` — whether the process is still running
-- `lastUsed` — time since last use (e.g., `"12s ago"`)
-
----
-
-### Internal Methods
+* **Description:** Triggered upon intercepting `system.plugin.spawn`. Launches the on-demand process that provides `capName`.
+1. Looks up the `CatalogEntry`; exits if missing or not `onDemand`.
+2. If already in `managed`, publishes `system.plugin.spawned` and returns (idempotent draining).
+3. Guards against concurrent launches using the `spawning` lock set.
+4. Builds `ProcessBuilder` with JBang commands, sets execution directory to `pluginDir`, redirects output to `logs/<pluginId>.log`, and starts the process.
+5. Saves `ManagedProcess`, registers `process.onExit()` callback to publish `system.plugin.died` in case of sudden crashes, and publishes `system.plugin.spawned`.
 
 #### `void checkIdlePlugins()`
-Called every 60 seconds by the internal `ScheduledExecutorService`. Iterates over `managed`, computes idle duration against each plugin's `idleTimeoutSeconds`, and calls `terminatePlugin()` for those that have exceeded the limit.
+* **Description:** Scheduled check running every 60 seconds. Iterates active `managed` plugins, computes idle elapsed durations against thresholds, and terminates idle plugins.
 
 #### `void terminatePlugin(String pluginId, String reason)`
-Calls `process.destroy()`, waits up to 5 seconds, then `destroyForcibly()` if needed. Removes the plugin from `managed` and `lastUsed`, then publishes `system.plugin.stopped` on the bus.
+* **Description:** Graceful shutdown handler. Destroys the JVM process, waits 5 seconds, forces termination if unresolved, updates tracking tables, and broadcasts `system.plugin.stopped` on the bus.
 
 ---
 
-## 5. Boot Wiring (Kernel.start)
+## 5. Dynamic Boot Loading (Kernel.java)
+
+Interceptors are resolved dynamically at startup without hardcoded registrations. The Kernel instantiates them by convention and invokes their lifecycle hooks:
 
 ```java
-var bus       = new KernelBusImpl(this);
-var pluginMgr = new PluginManager(bus, mk8Root);
-Thread.ofVirtual().start(pluginMgr::scan);   // non-blocking background scan
+// Resolved dynamically from CLI positional arguments:
+var cls         = Class.forName(name);
+var interceptor = instantiate(cls.asSubclass(EventInterceptor.class), bus, config);
 
-var idempotency = new IdempotencyInterceptor(bus);
-var capIdx      = new CapabilityInterceptor(bus);
-capIdx.setRuntime(pluginMgr);                // inject PluginRuntime
-
-interceptors = List.of(idempotency, capIdx); // immutable after this point
+if (interceptor instanceof InterceptorLifecycle lc) {
+    lc.onStart(); // Triggers scan() and checkIdlePlugins() scheduler
+}
 ```
-
-`PluginManager` is **not** part of the interceptor chain. It is a pure infrastructure service — `CapabilityInterceptor` calls it directly through the `PluginRuntime` interface.
 
 ---
 
 ## 6. Log Redirection
 
-All child process output (stdout + stderr) is redirected to `logs/<pluginId>.log` under the project root via:
+All child process output (stdout + stderr) is captured transparently and redirected to `logs/<pluginId>.log` under the project root via:
 
 ```java
 new ProcessBuilder(command)

@@ -6,7 +6,7 @@ This document outlines the architectural patterns and communication protocols im
 
 ## 1. KernelEvent Bus and UDS Protocol
 
-The system runs on an asynchronous event bus communicating via Unix Domain Sockets (UDS) located at `/tmp/mk8/kernel.sock`. 
+The system runs on a generic asynchronous event bus communicating via Unix Domain Sockets (UDS) located at `/tmp/mk8/kernel.sock` (configurable per instance). 
 
 ### Length-Prefixed Frame Protocol
 To guarantee message integrity without parsing streams line-by-line, the system uses a binary length-prefixed framing protocol:
@@ -31,14 +31,12 @@ All transmissions must conform to the unified event record structure containing:
 
 ## 2. Capabilities and Live Auctions
 
-Capabilities are declarative functions exposed by plugins. When multiple active plugins register identical capabilities, the kernel resolves incoming invocations using an automated real-time bidding auction.
+Capabilities are declarative functions exposed by plugins. When multiple active plugins register identical capabilities, the kernel resolves incoming invocations using an automated real-time bidding auction managed by the `CapabilityInterceptor`.
 
 ### The Auction Engine Sequence
 1. **Invocation**: A client requests execution via `capability.invoke` for a specific capability name.
 2. **Identification**: If multiple active providers exist, the Kernel triggers an auction and broadcasts `capability.bid.request`.
 3. **Response**: Providers reply within 500ms using `capability.bid.response` supplying:
-   - `score`: Absolute qualification metric.
-   - `load`: Current utilization factor (0.0 to 1.0).
 4. **Resolution**: The winner is determined based on the highest effective score calculation:
    $$\text{Effective Score} = \text{score} \times (1.0 - \text{load})$$
    If no bids are returned, the kernel falls back to routing to the first registered candidate.
@@ -50,7 +48,7 @@ Capabilities are declarative functions exposed by plugins. When multiple active 
 The kernel intercepts invocations at the gateway layer to eliminate duplicate processing and optimize external resource consumption.
 
 ### Cache Deduplication
-When execution results (`capability.result` or `capability.error`) return, the Kernel caches them under their unique `correlationId` using a sliding-window cache. Subsequent identical invocations within 5 minutes retrieve the cached result instantly in **1ms**, bypassing the execution pipeline.
+When execution results (`capability.result` or `capability.error`) return, the Kernel's `IdempotencyInterceptor` caches them under their unique `correlationId` using a sliding-window cache. Subsequent identical invocations within 5 minutes retrieve the cached result instantly in **1ms**, bypassing the execution pipeline.
 
 ### Request Collapsing (Single-Flight)
 If a duplicate invocation arrives while the original request is actively in-flight (e.g., while the target plugin is launching), the Kernel blocks routing the duplicate. Instead, it collapses the request by attaching the duplicate caller's connection to the execution. Once the single result returns, the Kernel duplicates and delivers it to all collapsed callers.
@@ -59,7 +57,7 @@ If a duplicate invocation arrives while the original request is actively in-flig
 
 ## 4. Plugin Lifecycle Modes
 
-Plugins operate under two primary execution cycles declared in their `plugin.json` configurations:
+Plugins operate under two primary execution cycles declared in their `plugin.json` configurations. Their processes are managed by the `PluginManager`, which is a decoupled event-driven interceptor:
 
 ### Persistent Mode
 - Loaded on start or manually spawned.
@@ -67,7 +65,7 @@ Plugins operate under two primary execution cycles declared in their `plugin.jso
 - Do not shut down automatically on idle periods.
 
 ### On-Demand Mode
-- Loaded dynamically by `PluginManager` only when their specific capability is invoked.
+- Loaded dynamically by `PluginManager` only upon receiving a `system.plugin.spawn` event from the bus (emitted by `CapabilityInterceptor` when a catalogued capability is invoked but has no active socket connection).
 - Shut down automatically via a scheduled background task if they remain idle longer than their declared `idleTimeoutSeconds` threshold.
 
 ---
@@ -103,4 +101,4 @@ The Kernel routing system combines two distinct routing topologies:
 
 The MicroKernel decouples logs generation from storage mechanics:
 - **No Disk Writing inside Plugins**: Plugin developers simply print statements to standard output (`System.out`) or standard error (`System.err`).
-- **OS-Level Capture**: `PluginManager` captures stdout/stderr of spawned processes at launch via `ProcessBuilder` stream redirection, writing them directly to dedicated `.log` files inside the project's root `logs/` directory.
+- **OS-Level Capture**: `PluginManager` captures stdout/stderr of spawned processes at launch via `ProcessBuilder` stream redirection, writing them directly to dedicated `.log` files inside the project's relative `logs/` directory configured dynamically at boot time.

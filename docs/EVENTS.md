@@ -44,7 +44,7 @@ Plugins declare their interests during `plugin.register` using two distinct arra
 | :--- | :--- | :--- |
 | `plugin.register` | Plugin → Kernel | Announces plugin id, subscribes, wildcardSubscribes, and capabilities. First frame on every connection. |
 | `plugin.ready` | Kernel → Plugin | Kernel confirms the plugin is registered and active. |
-| `plugin.installed` | External → Kernel | Signals that a new plugin directory was dropped on disk. `CapabilityInterceptor` re-scans the catalog on receipt. |
+| `plugin.installed` | External → Kernel | Signals that a new plugin directory was dropped on disk. Re-scans the catalog on receipt. |
 
 ---
 
@@ -65,18 +65,18 @@ The core protocol for service discovery, routing, and result delivery.
 | `capability.bid.response` | Plugin → Kernel | Candidate submits its bid: `{ "score": 0.9, "load": 0.1 }`. `CapabilityInterceptor` selects the winner using `score × (1 − load)`. |
 | `capability.tool.{name}` | Kernel → Tool | Trigger event published by `CapabilityInterceptor` when it resolves a `capability.invoke` to a tool plugin that declared a `triggerEvent`. Example: `capability.tool.text.wordcount`. |
 
-### Built-in Capability Names
+### Built-in and System Capability Names
 
-These names are recognized inside `capability.invoke` payload and handled in-process:
+These names are recognized inside `capability.invoke` payload and handled:
 
 | Name | Handler | Description |
 | :--- | :--- | :--- |
 | `system.capability.list` | `CapabilityInterceptor` | Returns a JSON array of all registered capabilities (live + catalog). |
-| `system.plugin.list` | `CapabilityInterceptor` → `PluginRuntime` | Returns a `capability.result` payload listing all managed plugins and their status (PID, alive, lastUsed). Handled in-process via `runtime.listPlugins()` — no UDS broadcast. |
+| `system.plugin.list` | `PluginManager` | Dynamic capability. Returns a `capability.result` payload listing all managed plugins and their status (PID, alive, lastUsed). Routed via trigger event `system.plugin.list.request`. |
 
 ---
 
-## 5. Direct Peer-to-Peer Routing: `message.*`
+## 4. Direct Peer-to-Peer Routing: `message.*`
 
 | KernelEvent | Direction | Description |
 | :--- | :--- | :--- |
@@ -86,13 +86,25 @@ These names are recognized inside `capability.invoke` payload and handled in-pro
 
 ---
 
-## 6. System Notifications: `system.plugin.*`
+## 5. System Notifications: `system.*`
 
-Published by `PluginManager` to notify the bus of child process lifecycle changes.
+Published by `PluginManager` and `CapabilityInterceptor` to orchestrate dynamic discovery and process lifecycle management asynchronously.
+
+### A. Lifecycle Notifications: `system.plugin.*`
 
 | KernelEvent | Publisher | Description |
 | :--- | :--- | :--- |
+| `system.plugin.spawn` | CapabilityInterceptor | Requests launching an on-demand plugin. Consumed by `PluginManager`. |
+| `system.plugin.usage` | CapabilityInterceptor | Reports capability activity to update idle timers. Consumed by `PluginManager`. |
 | `system.plugin.spawned` | PluginManager | Child process started successfully. Payload: `{ "pluginId": "word-count", "pid": 12345 }`. |
-| `system.plugin.stopped` | PluginManager | Child process terminated (idle-timeout or explicit kill). |
-| `system.plugin.died` | PluginManager | Child process exited unexpectedly (non-zero exit code or crash). `CapabilityInterceptor` removes its registrations on receipt. |
+| `system.plugin.stopped` | PluginManager | Child process terminated gracefully (idle-timeout). |
+| `system.plugin.died` | PluginManager | Child process exited unexpectedly (crash or non-zero exit code). |
+
+### B. Catalog Sync Notifications: `system.catalog.*`
+
+| KernelEvent | Publisher | Description |
+| :--- | :--- | :--- |
+| `system.catalog.entry` | PluginManager | Broadcasts catalog config details during directory scans. Consumed by `CapabilityInterceptor` to build its local registry mappings. |
+| `system.catalog.ready` | PluginManager | Signals directory scanning is fully complete. Consumed by `CapabilityInterceptor` to complete its startup readiness promise. |
+| `system.catalog.refresh`| Any → PluginManager| Requests directory re-scan. Consumed by `PluginManager`. |
 

@@ -9,22 +9,24 @@ For a conceptual deep dive into the system's core design patterns — such as ca
 ## 1. Project Structure
 
 * 📁 **MK8 (Project Root)**
-  * 📄 **[Start.java](Start.java)** — Bootrunner: spawns Kernel and SummaryAgent in the background, streams DemoRunner in the foreground, auto-generates `logs/start.log` via `TeeOutputStream`, and tears down all processes on exit.
   * 📄 **[README.md](README.md)** — Main entry point (Setup, Quick Start, and documentation index).
-  * 📁 **`logs/`** — Auto-created on first run. Contains `start.log` (full run transcript), `kernel.log`, `summary-agent.log`, and `word-count.log`.
   * 📁 **`kernel/`** *(MicroKernel Core Infrastructure)*
-    * 📄 **[Kernel.java](kernel/Kernel.java)** — UDS server, routing tables, interceptor chain wiring, and top-level records (`CatalogEntry`, `PrefixRoute`, `Connection`). Also defines the `EventInterceptor`, `KernelBus`, and `PluginRuntime` interfaces. *(See **[Core Kernel Architecture](docs/KERNEL.md)**)*
-    * 📄 **[KernelEvent.java](kernel/KernelEvent.java)** — JSON event envelope, 4-byte length-prefixed frame protocol, Jackson factory methods, and timestamp-prefixing logging. *(See **[KernelEvent Taxonomy Reference](docs/EVENTS.md)**)*
-    * 📄 **[PluginConfig.java](kernel/PluginConfig.java)** — Typed accessors for `plugin.json` (id, lifecycle, capabilities, launch command, llm, agent, thinking blocks).
-    * 📄 **[PluginBase.java](kernel/PluginBase.java)** — Plugin bootstrap: UDS connect, `plugin.register` handshake, virtual-thread dispatcher, and auto-bidding. *(See **[PluginBase Reference](docs/PLUGIN_BASE.md)**)*
-    * 📄 **[PluginManager.java](kernel/PluginManager.java)** — Single source of truth for plugins: directory scan, catalog indexing, on-demand process spawn, idle-kill sweep. Implements `PluginRuntime`. *(See **[PluginManager Guide](docs/PLUGIN_MANAGER.md)**)*
-    * 📄 **[CapabilityInterceptor.java](kernel/CapabilityInterceptor.java)** — Live capability registry, bidding auction engine, built-in capability dispatcher. Depends only on `PluginRuntime` — zero reference to `PluginManager`. *(See **[CapabilityInterceptor Guide](docs/CAPABILITY_INTERCEPTOR.md)**)*
-    * 📄 **[IdempotencyInterceptor.java](kernel/IdempotencyInterceptor.java)** — Single-Flight request collapsing and sliding-window result cache. *(See **[Idempotency & Collapsing Guide](docs/IDEMPOTENCY.md)**)*
-  * 📁 **`system/`** *(Persistent Orchestrators)*
-    * 📁 **`demo-runner/`** — Verification client: fires concurrent and sequential requests, validates collapsing and cache hits. *(See **[Pipeline Verification Demo](docs/VERIFICATION_DEMO.md)**)*
-    * 📁 **`summary-agent/`** — Persistent orchestrator that delegates to WordCountTool and returns formatted analysis reports.
-  * 📁 **`tools/`** *(On-Demand Workers)*
-    * 📁 **`word-count/`** — On-demand tool: word, sentence, and unique-word counting. *(See **[Creating a Plugin from Scratch](docs/CREATE_PLUGIN.md)**)*
+    * 📄 **[Kernel.java](kernel/Kernel.java)** — UDS server, routing tables, interceptor chain wiring, and config parameters. Also defines the core `EventInterceptor` and `KernelBus` interfaces. *(See **[Core Kernel Architecture](docs/KERNEL.md)**)*
+    * 📄 **[KernelEvent.java](kernel/KernelEvent.java)** — JSON event envelope, 4-byte length-prefixed frame protocol, Jackson factory methods, and timestamp-prefixed logging. *(See **[KernelEvent Taxonomy Reference](docs/EVENTS.md)**)*
+    * 📁 **`interceptors/`** *(Pluggable Event Interceptors)*
+      * 📁 **`capability/`**
+        * 📄 **[CapabilityInterceptor.java](kernel/interceptors/capability/CapabilityInterceptor.java)** — Live capability registry, bidding auction engine, and dynamic route resolver. Communicates purely via asynchronous events with zero direct references to PluginManager. *(See **[CapabilityInterceptor Guide](docs/CAPABILITY_INTERCEPTOR.md)**)*
+      * 📁 **`idempotency/`**
+        * 📄 **[IdempotencyInterceptor.java](kernel/interceptors/idempotency/IdempotencyInterceptor.java)** — Single-Flight request collapsing and sliding-window cache. *(See **[Idempotency & Collapsing Guide](docs/IDEMPOTENCY.md)**)*
+      * 📁 **`plugin/`**
+        * 📄 **[PluginManager.java](kernel/interceptors/plugin/PluginManager.java)** — Plugin discovery, catalog publishing, and process lifecycle spawner. Participates directly in the event loop as an EventInterceptor. *(See **[PluginManager Guide](docs/PLUGIN_MANAGER.md)**)*
+        * 📄 **[PluginBase.java](kernel/interceptors/plugin/PluginBase.java)** — Standardized connection bootstrap, virtual-thread event dispatcher, and auto-bidding. *(See **[PluginBase Reference](docs/PLUGIN_BASE.md)**)*
+        * 📄 **[PluginConfig.java](kernel/interceptors/plugin/PluginConfig.java)** — Typed record mapping from `plugin.json` files.
+  * 📁 **`projects/`** *(Isolated Runnable Projects)*
+    * 📁 **`SimpleProject/`** — Direct connection demo where Consumer and Producer communicate directly over UDS with no `PluginBase` or `plugin.json`.
+    * 📁 **`PluginProject/`** — Standard consumer/producer pipeline managed by the `PluginManager` interceptor.
+    * 📁 **`InterceptorsProject/`** — Advanced performance pipeline testing idempotency request collapsing and caching under `DemoRunner`, `SummaryAgent`, and `WordCountTool`. *(See **[Pipeline Verification Demo](docs/VERIFICATION_DEMO.md)**)*
+    * 📁 **`ChatAI/`** — Interactive terminal UI chat assistant powered by Google's Gemini-3.5-flash via OpenRouter.
 
 ---
 
@@ -34,8 +36,10 @@ For a conceptual deep dive into the system's core design patterns — such as ca
 * **JDK 21+**
 * **JBang** on your PATH
 
-### Run Command
+### Run the Advanced Interceptors Demo
+To execute the pipeline verifying Request Collapsing and Sliding-Window caching:
 ```bash
+cd projects/InterceptorsProject
 jbang Start.java
 ```
 
@@ -45,11 +49,11 @@ jbang Start.java
           MK8 MicroKernel — Boot Runner                
 =======================================================
 
-[BOOT] Starting Kernel.java in the background...
-[BOOT] Waiting for Kernel UDS socket to bind..... Connected! (Socket verified)
+[BOOT] Starting Kernel (IdempotencyInterceptor CapabilityInterceptor PluginManager)...
+[BOOT] Waiting for Kernel UDS socket..... Connected! (Socket verified)
 
-[BOOT] Starting SummaryAgent.java in the background...
-[BOOT] Executing DemoRunner.java in the foreground...
+[BOOT] Starting SummaryAgent in the background...
+[BOOT] Executing DemoRunner in the foreground...
 
 ╔══════════════════════════════════════════════════════╗
 ║    MK8 Kernel-Extendido — Idempotency & Collapsing    ║
@@ -87,7 +91,7 @@ jbang Start.java
 
 [DEMO] === RUNNING SEQUENTIAL CACHE HIT TEST ===
 [DEMO] Sending duplicate request #3 sequentially (corrId=haiku-collapsed-id)...
-[DEMO] → Sent sequential request #3 in 0ms
+[DEMO] → Sent sequential request #3 in 1ms
 ┌─ Result received (latch=1) corrId=haiku-collapsed-id ──
 │ 📄 Text Analysis Report
 │ ─────────────────────────────
@@ -151,20 +155,21 @@ For a detailed explanation of the text analysis example (word, sentence, and voc
 If you prefer to inspect individual process streams and logs in real time, execute the components sequentially in three separate terminal windows:
 
 ### Step 1: Start the Core Kernel UDS Server
+Start the Kernel with all interceptors loaded:
 ```bash
 cd kernel
-jbang Kernel.java
+jbang Kernel.java --logs=../projects/InterceptorsProject/logs --scan=../projects/InterceptorsProject IdempotencyInterceptor CapabilityInterceptor PluginManager
 ```
 
 ### Step 2: Start the Summary Agent
 ```bash
-cd system/summary-agent
+cd projects/InterceptorsProject/summary-agent
 jbang SummaryAgent.java
 ```
 
 ### Step 3: Execute the Demo Runner
 ```bash
-cd system/demo-runner
+cd projects/InterceptorsProject/demo-runner
 jbang DemoRunner.java
 ```
 
@@ -174,12 +179,12 @@ jbang DemoRunner.java
 
 * **[Core Kernel Architecture](docs/KERNEL.md):** UDS channel communications, length-prefixed binary framing, virtual-thread topology, and the interceptor chain pipeline.
 * **[System Concepts](docs/CONCEPTS.md):** Capability auctions, idempotency caching, Single-Flight request collapsing, persistent/on-demand lifecycles, and distributed tracing.
-* **[System Architecture & Class Reference](docs/ARCHITECTURE.md):** Class layout, interface specs (`EventInterceptor`, `KernelBus`, `PluginRuntime`), and method signatures.
+* **[System Architecture & Class Reference](docs/ARCHITECTURE.md):** Class layout, interface specs (`EventInterceptor`, `KernelBus`), and method signatures.
 * **[KernelEvent Taxonomy Reference](docs/EVENTS.md):** Complete event catalog: `capability.*`, `system.plugin.*`, `message.*`, built-in capability names.
-* **[PluginManager Guide](docs/PLUGIN_MANAGER.md):** Catalog scan, `CatalogEntry` record, on-demand process spawn, idle-kill sweep, and the `PluginRuntime` interface.
-* **[CapabilityInterceptor Guide](docs/CAPABILITY_INTERCEPTOR.md):** Live registry, bidding auction engine, `handleInvoke` flow, and built-in handler dispatch map.
+* **[PluginManager Guide](docs/PLUGIN_MANAGER.md):** Catalog scan, `CatalogEntry` record, on-demand process spawn, idle-kill sweep, and dynamic capability hosting.
+* **[CapabilityInterceptor Guide](docs/CAPABILITY_INTERCEPTOR.md):** Live registry, bidding auction engine, `handleInvoke` flow, and decoupled event-driven routing.
 * **[Idempotency & Collapsing Guide](docs/IDEMPOTENCY.md):** Single-Flight collapsing implementation, sliding-window result cache, and memory-leak guards.
 * **[PluginBase Reference](docs/PLUGIN_BASE.md):** Plugin bootstrap, `run()`, `publish()`, auto-bidding (`handleBidAuto`), and virtual-thread dispatch lifecycle.
 * **[Pipeline Verification Demo Guide](docs/VERIFICATION_DEMO.md):** Component roles, publisher/consumer event chain table, and sequence flowchart for the text analysis pipeline.
-* **[Creating a Plugin from Scratch](docs/CREATE_PLUGIN.md):** Step-by-step guide: `plugin.json`, instance pattern (`new Plugin().start()`), triggerEvent wiring, and pipeline integration.
+* **[Creating a Plugin from Scratch](docs/CREATE_PLUGIN.md):** Step-by-step guide: `plugin.json`, instance pattern (`new Plugin().start()`), triggerEvent wiring, and pipeline integration inside the `projects/` workspace.
 * **[Plugin Configuration Schemas](docs/PLUGIN_SCHEMAS.md):** Full `plugin.json` field reference for `system`, `tool`, and `agent` types; launch block; boot-order tiers.

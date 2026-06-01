@@ -8,13 +8,15 @@ As a reference, we will build a **Sentiment Analysis Tool** (`SentimentAnalysisT
 
 ## 1. Directory Structure
 
-Every plugin must reside in its own dedicated directory. This directory can contain the plugin metadata, source files, and dependencies.
+Every plugin must reside in its own dedicated directory under a specific project module within the `projects/` directory. This isolates dependencies and scope.
 
-For our tool, construct this directory:
+For our new tool, we will create its directory inside a new project `projects/SentimentProject`:
 ```
-tools/sentiment-analysis/
-├── plugin.json                 # Declarative configuration and capability schemas
-└── SentimentAnalysisTool.java  # Java executable source file
+projects/SentimentProject/
+├── Start.java                      # Project boot runner
+└── sentiment-analysis/
+    ├── plugin.json                 # Declarative configuration and capability schemas
+    └── SentimentAnalysisTool.java  # Java executable source file
 ```
 
 ---
@@ -23,7 +25,7 @@ tools/sentiment-analysis/
 
 The `plugin.json` file declares the plugin metadata, lifecycle rules, launch parameters, and capability schemas. 
 
-Create `tools/sentiment-analysis/plugin.json` containing:
+Create `projects/SentimentProject/sentiment-analysis/plugin.json` containing:
 
 ```json
 {
@@ -38,7 +40,7 @@ Create `tools/sentiment-analysis/plugin.json` containing:
   "launch": {
     "name": "SentimentAnalysis",
     "command": ["jbang", "SentimentAnalysisTool.java"],
-    "order": 25
+    "order": 30
   },
   "capabilities": [
     {
@@ -50,13 +52,16 @@ Create `tools/sentiment-analysis/plugin.json` containing:
   ],
   "subscribes": [
     "capability.tool.text.sentiment"
+  ],
+  "publishes": [
+    "capability.result"
   ]
 }
 ```
 
 ### Key Fields Explained
-- `lifecycle.mode`: Set to `"on-demand"` so `PluginManager` only spawns the tool when `text.sentiment` is invoked, and kills it when idle.
-- `launch.command`: The command array used by the kernel to start the process.
+- `lifecycle.mode`: Set to `"on-demand"` so the `PluginManager` interceptor only spawns the tool when `text.sentiment` is invoked, and terminates it automatically when idle.
+- `launch.command`: The command array used by `PluginManager` to start the process.
 - `capabilities[].triggerEvent`: For tools, this is the event type the kernel routes to the tool. The tool must subscribe to this exact type in its `subscribes` list.
 
 > [!NOTE]
@@ -66,17 +71,18 @@ Create `tools/sentiment-analysis/plugin.json` containing:
 
 ## 3. Implementation: `SentimentAnalysisTool.java`
 
-Plugins use JBang to run without manual classpath configurations. They import the kernel's shared `KernelEvent.java` and `PluginBase.java` files using JBang's `//SOURCES` directives.
+Plugins use JBang to run without manual classpath configurations. They import the kernel's shared files using relative JBang `//SOURCES` directives pointing back to the core `kernel/` directory.
 
-Create `tools/sentiment-analysis/SentimentAnalysisTool.java` containing:
+Create `projects/SentimentProject/sentiment-analysis/SentimentAnalysisTool.java` containing:
 
 ```java
 ///usr/bin/env jbang "$0" "$@" ; exit $?
 //JAVA 21+
 //DEPS com.fasterxml.jackson.core:jackson-databind:2.17.2
 //DEPS com.fasterxml.jackson.datatype:jackson-datatype-jsr310:2.17.2
-//SOURCES ../../kernel/KernelEvent.java
-//SOURCES ../../kernel/PluginBase.java
+//SOURCES ../../../kernel/KernelEvent.java
+//SOURCES ../../../kernel/interceptors/plugin/PluginConfig.java
+//SOURCES ../../../kernel/interceptors/plugin/PluginBase.java
 
 import com.fasterxml.jackson.databind.JsonNode;
 import java.io.OutputStream;

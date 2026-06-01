@@ -25,9 +25,6 @@ The `PluginBase.java` class serves as the standardized, reusable connector frame
   * `socketPath`: Path to the Unix Domain Socket (defaults to `/tmp/mk8/kernel.sock`; override with `-Dmk8.socket=…`).
   * `handler`: The custom functional callback interface `EventHandler` mapping events to plugin logic.
 
-#### `public static void runSync(String configPath, String socketPath, EventHandler handler)`
-* **Description:** Identical to `run()`, but processes incoming event frames sequentially in a single thread. Used when message ordering is critical (such as the Logger plugin writing sequential outputs to a file).
-
 ---
 
 ### B. Messaging and Publishing
@@ -41,14 +38,11 @@ The `PluginBase.java` class serves as the standardized, reusable connector frame
 #### `public static void publishSafe(KernelEvent e, OutputStream out)`
 * **Description:** Identical to `publish()`, but catches and suppresses any IOExceptions. Used in telemetry or logs dispatching where a failure must not interrupt the plugin's main execution loop.
 
-#### `public static void publishLog(String level, String message, String source, OutputStream out)`
-* **Description:** Helper method to format and publish a unified log event (`log.info`, `log.error`, etc.) to the central Logger plugin.
-
 ---
 
 ## 3. Asynchronous Execution Lifecycle Flow
 
-The flow diagram below details how the `PluginBase` handles connection bootstrap and incoming frames using Virtual Threads:
+The flow diagram below details how the `PluginBase` handles connection bootstrap and incoming UDS frames using Virtual Threads:
 
 ```
         Plugin Startup
@@ -57,10 +51,10 @@ The flow diagram below details how the `PluginBase` handles connection bootstrap
     [Load plugin.json Schema]
               │
               ▼
-[Establish Socket Connection to UDS]
+ [Establish Socket Connection to UDS]
               │
               ▼
- [Register Capabilities on KernelEvent Bus]
+  [Register Capabilities on Event Bus]
               │
               ▼
     ┌───► [Read UDS Stream Frame]
@@ -80,7 +74,7 @@ The flow diagram below details how the `PluginBase` handles connection bootstrap
     │                                                         │
     │                                                         ▼
     │                                                     [Run custom plugin logic]
-    └─────────────────────────┘
+    │ └─────────────────────────┘
 ```
 
 ---

@@ -6,144 +6,112 @@ This document maps the package organization, class responsibilities, and core me
 
 ## 1. Class Organization
 
-All primary microkernel classes reside inside the `kernel` directory, sharing a single package level to maximize execution speed and simplify compilation via JBang:
+Primary microkernel classes reside inside the `kernel` directory, structured into pluggable subpackages to maintain strict architectural separation, while execution paths remain fully asynchronous:
 
 ```
 kernel/
-├── Kernel.java                 # UDS Server, connection manager, routing maps, core interfaces
-├── KernelEvent.java                  # Unified envelope, frame protocol, logging infrastructure
-├── PluginConfig.java           # plugin.json mapping (typed record accessors)
-├── PluginBase.java             # Connection bootstrap, virtual thread dispatcher
-├── PluginManager.java          # Plugin discovery, catalog, lifecycle (spawn, kill, track)
-├── CapabilityInterceptor.java        # Live registry, bid request broker, auction scheduler
-└── IdempotencyInterceptor.java  # Deduplication cache, collapsing set manager
+├── Kernel.java                        # UDS Server, connection manager, convention instantiator, core interfaces
+├── KernelEvent.java                   # Unified envelope, frame protocol, logging infrastructure
+└── interceptors/                      # Pluggable interceptor packages
+    ├── capability/
+    │   └── CapabilityInterceptor.java # Live registry, bid request broker, auction scheduler
+    ├── idempotency/
+    │   └── IdempotencyInterceptor.java# Deduplication cache, collapsing set manager
+    └── plugin/
+        ├── PluginBase.java            # Connection bootstrap, virtual thread dispatcher
+        ├── PluginConfig.java          # plugin.json mapping (typed record accessors)
+        └── PluginManager.java         # Plugin discovery, catalog, lifecycle spawner
+```
+
+All runnable verification scenarios and end-user interactive modules reside inside the `projects/` directory:
+
+```
+projects/
+├── SimpleProject/                     # Direct raw UDS socket producer/consumer loop
+├── PluginProject/                     # Persistent plugins controlled via PluginManager
+├── InterceptorsProject/               # Performance verification demo with full interceptors stack
+└── ChatAI/                            # Conversational console terminal linked to LangChain4j Agent
 ```
 
 ---
 
 ## 2. Interface Specifications
 
-Decoupling between UDS infrastructure and extension logic is achieved via three core interfaces.
+Decoupling between UDS infrastructure and extension logic is achieved via core interfaces implemented by interceptors.
 
 ### `EventInterceptor`
 Interceptors hook directly into the event bus pipeline inside `Kernel.route()`.
 - `boolean intercept(KernelEvent event, String json) throws Exception`
   - **Return `true`**: Consumes the event, halting the interceptor chain and skipping standard routing/broadcast.
   - **Return `false`**: Executes side-effects, allowing subsequent interceptors and standard routing to execute.
+- `default boolean handles(String eventType)`: Returns `true` if this interceptor handles this event type. Used by the Kernel to pre-filter events.
+- `default Set<String> publishes()`: Declares which event types this interceptor produces (used for boot logging).
+- `default Set<String> subscribes()`: Declares which event types this interceptor consumes (used for boot logging).
 
 ### `KernelBus`
 Provides a safe interface for interceptors to re-publish events into the bus or push frames directly to specific connections.
 - `void sendTo(String pluginId, String json)`: Delivers a payload directly to a client's write queue, bypassing routing.
 - `void route(KernelEvent event) throws Exception`: Serializes and pushes an event through the full Kernel routing pipeline.
-- `void removePendingRoute(String corrId)`: Removes a correlationId from the return-routing table. Used by `IdempotencyInterceptor` after it manually delivers a result, to prevent memory leaks in `pendingRoutes`.
+- `void addPendingRoute(String corrId, String sourcePluginId)`: Stores a correlation path mapping.
+- `String removePendingRoute(String corrId)`: Removes a correlation ID from the return-routing table (used to prevent memory leaks).
 
-### `PluginRuntime`
-The contract between `CapabilityInterceptor` and `PluginManager`. `CapabilityInterceptor` depends only on this interface — it never references `PluginManager` directly.
-
-```java
-interface PluginRuntime {
-    // Catalog
-    void awaitReady(long timeoutMs);
-    CatalogEntry getByCapName(String capName);
-    Collection<CatalogEntry> allEntries();
-    void refresh();
-    // Lifecycle
-    void spawnOnDemand(String capabilityName) throws Exception;
-    void trackUsage(String capabilityName);
-    String listPlugins() throws Exception;
-}
-```
+### `InterceptorLifecycle`
+Used by interceptors requiring a background task (e.g. running a directory scan thread or idle checker scheduler) initiated at boot time.
+- `void onStart()`: Triggered by the Kernel immediately after instantiating the interceptor class.
 
 ---
 
 ## 3. Core Infrastructure Classes
 
 ### `Kernel.java`
-The gateway server managing network sockets and connections.
+The gateway server managing network sockets and connections. It is a pure, generic event bus that discovers and runs interceptors dynamically from command line arguments.
+- **Convention-Based Instantiation**: Positional CLI arguments map directly to classpath class names (e.g. `IdempotencyInterceptor`, `CapabilityInterceptor`, `PluginManager`). The Kernel instantiates them by trying constructors in order: `(KernelBus, KernelConfig) -> (KernelBus) -> ()`.
 - **Key Fields**:
   - `exactRoutes`: Maps event type strings to connection arrays.
   - `prefixRoutes`: Tracks wildcard prefix routes (`*` patterns).
   - `byPluginId`: Maps active plugin identifiers to UDS connection handles.
   - `pendingRoutes`: Maps `correlationId` to the source plugin ID for reply routing.
-  - `interceptors`: Immutable `List<EventInterceptor>` wired at boot: `[idempotency, capIdx]`.
-  - `KERNEL_SOURCE`: Synthetic `Connection` used when the kernel re-enters its own routing pipeline (no writer thread started).
+  - `interceptors`: Pluggable `List<EventInterceptor>` resolved at boot.
 - **Key Methods**:
-  - `main(String[] args)`: Boots the kernel, wires `PluginManager` + `CapabilityInterceptor`, starts the background scan, and runs the socket accept-loop.
-  - `start()`: Binds the UDS socket, assembles the interceptor chain, and accepts connections.
-  - `route(KernelEvent event, String json, Connection source)`: Evaluates destinations based on event types, manages `pendingRoutes`, executes interceptors, and pushes frames.
-  - `findProjectRoot()`: Resolves project root by searching parent directories for the `kernel` directory or a `Start.java` anchor.
+  - `main(String[] args)`: Boots the kernel, parses socket paths, logs directories, scans roots, dynamically loads interceptor classes, and triggers `onStart()` hooks.
+  - `start(List<EventInterceptor> interceptorList)`: Binds the UDS socket and starts the accepted client connection loops.
+  - `route(KernelEvent event, String json, Connection source)`: Executes the interceptor chain sequentially (pre-filtered via `handles()`) and broadcasts if not consumed.
 
 ### `KernelEvent.java`
-Defines the structure of messages, physical framing, and shared logging infrastructure.
+Defines the structure of messages, UDS length-prefixed framing, and shared logging infrastructure.
 - **Key Records**:
-  - `KernelEvent`: Represents the event envelope record.
+  - `KernelEvent`: Unified event envelope record containing routing metadata fields (`correlationId`, `sessionId`, `traceId`, `spanId`).
 - **Key Methods**:
-  - `readFrame(InputStream in)`: Reads a 4-byte header and parses the specified payload size from a UDS stream.
-  - `writeFrame(OutputStream out, String json)`: Encapsulates a JSON payload into a length-prefixed frame.
-  - `initLogging()`: Installs a `TimestampPrintStream` on `System.out`/`System.err`; safe to call multiple times (guarded by a system property flag).
-
-### `PluginConfig.java`
-Typed record wrapping the raw `JsonNode` parsed from `plugin.json`. Provides accessor methods for all config sections: root identity (`id`, `type`, `version`), `lifecycle`, `capabilities`, `launch`, `llm`, `agent`, and `thinking`. Loaded via `PluginConfig.load(path)`.
-
-### `PluginBase.java`
-Removes repetitive client connection and registration boilerplate.
-- **Key Methods**:
-  - `run(String configPath, String socketPath, EventHandler handler)`: Boots plugin connection, runs standard capacity registrations, and dispatches received events concurrently using virtual threads.
-  - `publish(KernelEvent event, OutputStream out)`: Stringifies and delivers an event through the connection stream.
+  - `readFrame(InputStream in)`: Decodes big-endian headers and isolates JSON payloads.
+  - `writeFrame(OutputStream out, String json)`: Encapsulates JSON strings into length-prefixed frames.
 
 ---
 
-## 4. Interceptor Reference
+## 4. Pluggable Interceptor Reference
 
-The interceptor chain contains exactly two interceptors, executed in order for every `capability.invoke`:
+Interceptors are executed sequentially inside the Kernel pipeline:
 
 ```
-[IdempotencyInterceptor] → [CapabilityInterceptor]
+[IdempotencyInterceptor] → [CapabilityInterceptor] → [PluginManager]
 ```
 
-`PluginManager` is **not** an interceptor. It is a pure infrastructure service wired directly to `CapabilityInterceptor` via the `PluginRuntime` interface.
+Every interceptor is fully decoupled. In particular, `CapabilityInterceptor` and `PluginManager` have **zero direct code dependency** — they coordinate entirely via event broadcasts on the bus:
 
 ### `IdempotencyInterceptor.java`
 Acts as the entry barrier for event deduplication and collapsing.
-- **Key Fields**:
-  - `cache`: Map storing `correlationId` to resolved `KernelEvent` outcomes.
-  - `inFlight`: Map tracking `correlationId` to sets of waiting caller plugin IDs.
-- **Key Methods**:
-  - `intercept(KernelEvent event, String json)`: Directs `capability.invoke` to cache lookups or collapsing queues, and intercepts `capability.result` / `capability.error` to cache and manually distribute outputs.
+- **Atomic Collapsing**: Registers concurrent callers inside `inFlight.compute()` atomically to prevent race windows. Evicts sliding-window cache results automatically after their 5-minute TTL expires.
 
 ### `CapabilityInterceptor.java`
-Maintains live capability provider state and manages auctions.
-- **Key Fields**:
-  - `registrations`: Maps capability names to active `Registration` records (live providers only).
-  - `pendingInvokes`: Queues `capability.invoke` events while on-demand providers are spawning.
-  - `auctions`: Tracks in-flight `AuctionContext` objects by auction UUID.
-- **Key Methods**:
-  - `intercept(KernelEvent event, String json)`: Directs invoke queries, processes `capability.register` / `unregister` side-effects, and schedules auctions.
-  - `setRuntime(PluginRuntime r)`: Wires the `PluginRuntime` implementation (called once at boot by `Kernel`).
-  - `handleInvoke(KernelEvent event)`: Routes to a live provider, falls back to catalog via `PluginRuntime` for persistent/on-demand plugins, or queues pending invokes and calls `runtime.spawnOnDemand()`.
-  - `startAuction(String capName, List<Registration> providers, KernelEvent invokeEvent)`: Broadcasts `capability.bid.request` and schedules resolution after **500ms**.
-  - `resolveAuction(String auctionId)`: Determines the winning provider (highest `score × (1 - load)`) and forwards the queued invocation.
-
----
-
-## 5. Infrastructure Service
+Maintains live capability provider state and coordinates auctions.
+- **Event-Driven Catalog**: Instead of reading files directly, it subscribes to `system.catalog.entry` and `system.catalog.ready` events published by the `PluginManager` to compile its own local index.
+- **Dynamic Spawn & Usage Requests**: Lacking direct code pointers to the manager, it publishes `system.plugin.spawn` to boot an on-demand plugin and `system.plugin.usage` to update its activity status.
+- **Bidding Auctions**: Orchestrates bids from multiple providers via `capability.bid.request` and resolves the winner using:
+  $$\text{Effective Score} = \text{score} \times (1.0 - \text{load})$$
 
 ### `PluginManager.java`
-Single source of truth for plugin discovery and lifecycle. Merges catalog scanning (previously `PluginCatalog`) and process management (previously `ProcessManager`) into one cohesive class. Implements `PluginRuntime`.
-
-- **Key Records**:
-  - `CatalogEntry`: One entry per capability declaration. Fields: `pluginId`, `pluginDir`, `capabilityName`, `triggerEvent`, `onDemand`, `persistent`, `bidWeight`, `idleTimeoutSeconds`, `launchCommand[]`.
-  - `ManagedProcess`: Tracks a running child process. Fields: `pluginId`, `pid`, `pluginDir`, `process`.
-- **Key Fields**:
-  - `byCapName`: Maps capability name → `CatalogEntry`.
-  - `byPluginId`: Maps plugin ID → `List<CatalogEntry>`.
-  - `managed`: Maps plugin ID → `ManagedProcess` (running processes).
-  - `lastUsed`: Tracks last-used timestamp per plugin for idle-kill checks.
-  - `spawning`: Set of plugin IDs currently being launched (prevents double-spawn).
-- **Key Methods**:
-  - `scan()`: Walks directories beneath the resolved project root, ignores the `kernel` path, parses `plugin.json` configurations, and populates index mappings. Called in a virtual thread at boot.
-  - `spawnOnDemand(String capName)`: Looks up the `CatalogEntry`, builds `ProcessBuilder` with `redirectOutput(Redirect.appendTo(logFile)).redirectErrorStream(true)`, and binds process-exit callbacks.
-  - `trackUsage(String capName)`: Updates `lastUsed` for the owning plugin.
-  - `checkIdlePlugins()`: Invoked every 60 seconds to terminate on-demand plugins exceeding their `idleTimeoutSeconds`. Calls `terminatePlugin()` directly — no bus events.
-  - `listPlugins()`: Returns a JSON array of all managed processes and their status.
-  - `refresh()`: Synchronously re-scans disk on `plugin.installed`.
+Single source of truth for plugin discovery, process lifecycle, and log redirection.
+- **Pluggable Event Interceptor**: Scans the project root for `plugin.json` configurations at boot, broadcasts `system.catalog.entry` frames, and intercepts:
+  - `system.plugin.spawn` to execute background child processes via `ProcessBuilder`.
+  - `system.plugin.usage` to track usage timestamps.
+  - `system.plugin.list.request` to dynamically reply with running processes, statuses, and PIDs (handling the `system.plugin.list` capability).
+- **Idle-Kill & Stream Capture**: Destroys idle on-demand plugins exceeding their declared limits and redirects stdout/stderr streams to `logs/<pluginId>.log`.()`: Synchronously re-scans disk on `plugin.installed`.

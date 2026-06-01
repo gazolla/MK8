@@ -2,6 +2,8 @@
 
 The `IdempotencyInterceptor.java` class acts as the high-performance optimization gateway inside the MK8 MicroKernel. It intercepts capability invocations and results to enforce sliding-window idempotency caching and request collapsing (Single-Flight).
 
+It sits at position 0 in the Kernel's interceptor chain.
+
 ---
 
 ## 1. Core Optimizations
@@ -76,14 +78,20 @@ The sequence flowchart below illustrates how the interceptor handles incoming `c
 
 ### A. Core Interceptor Contract
 
+#### `public boolean handles(String type)`
+* **Description:** Pre-filters events. Returns `true` for `capability.invoke`, `capability.result`, and `capability.error`.
+
+#### `public Set<String> publishes()`
+* **Description:** Declares events published. Returns `Set.of("capability.result", "capability.error")`.
+
+#### `public Set<String> subscribes()`
+* **Description:** Declares events consumed. Returns `Set.of("capability.invoke", "capability.result", "capability.error")`.
+
 #### `public boolean intercept(KernelEvent event, String json) throws Exception`
 * **Description:** Implements the `EventInterceptor` interface. Receives all events from the core routing engine right before the broadcast phase.
 * **Arguments:**
   * `event`: The parsed `KernelEvent` record.
   * `json`: The raw serialized JSON frame.
-* **Returns:** `true` if the event was fully resolved and consumed by the interceptor (halting subsequent routing), or `false` to let normal routing proceed.
-
----
 
 ### B. Internal Workload Processing
 

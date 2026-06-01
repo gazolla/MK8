@@ -40,31 +40,34 @@ We intentionally use this text-counting task to test the Kernel's **concurrency 
 
 ## 2. Component and Plugin Breakdown
 
-The demo orchestrates three main actors alongside the Kernel core. Below is the description of the role, lifecycle, and event boundaries of each component:
+The demo orchestrates three main actors alongside the Kernel core, all located inside the `projects/InterceptorsProject` directory:
 
 ### A. `DemoRunner` (Client Initiator)
-* **Role:** Acts as the external client or user-facing entry point. It submits the initial analysis request to the event bus. To validate the Kernel's performance features, it issues concurrent identical requests (triggering the **Request Collapsing / Single-Flight** interceptor) followed by a sequential identical request (triggering the **Idempotency Cache** interceptor).
-* **Lifecycle:** Transitory command-line utility. Exits gracefully once the final report is received or when a failure threshold is hit.
+* **Location:** `projects/InterceptorsProject/demo-runner`
+* **Role:** Acts as the external client or user-facing entry point. It submits the initial analysis request to the event UDS bus. To validate the Kernel's performance features, it issues concurrent identical requests (triggering the **Request Collapsing / Single-Flight** interceptor) followed by a sequential identical request (triggering the **Idempotency Cache** interceptor).
+* **Lifecycle:** Transitory command-line utility. Exits gracefully once the final report is received.
 * **Events Published:**
   * `capability.invoke` (requesting the semantic capability `text.analyze`).
 * **Events Consumed:**
   * `capability.result` (containing the final consolidated analysis report).
 
 ### B. `SummaryAgent` (Persistent Pipeline Orchestrator)
-* **Role:** A high-level system agent that orchestrates the execution flow. It intercepts the generic analysis trigger, creates tracking tokens, generates unique sub-transaction correlation IDs, delegates the raw computations to specialised downstream tools, collects their asynchronous replies, and consolidates the output.
-* **Lifecycle:** Persistent background process. Boots during system startup (tier-2 ordering) and remains online to handle incoming messages.
+* **Location:** `projects/InterceptorsProject/summary-agent`
+* **Role:** A high-level system agent that orchestrates the execution flow. It intercepts the generic analysis trigger, creates tracking tokens, generates unique sub-transaction correlation IDs, delegates the raw computations to specialized downstream tools, collects their asynchronous replies, and consolidates the output.
+* **Lifecycle:** Persistent background process. Boots during system startup and remains online to handle incoming messages.
 * **Events Published:**
   * `capability.invoke` (requesting the computational capability `text.wordcount`).
   * `capability.result` (transmitting the integrated final report back to the parent caller).
   * `capability.error` (notifying the parent caller of downstream pipeline failures).
 * **Events Consumed:**
-  * `message.summary-agent` (intercepted routing event containing the raw text payload to analyze).
+  * `message.summary-agent` (routing event containing the raw text payload to analyze).
   * `capability.result` (asynchronous callbacks containing statistical outputs from downstream tools).
   * `capability.error` (handling downstream tool execution aborts).
 
 ### C. `WordCountTool` (On-Demand Utility)
+* **Location:** `projects/InterceptorsProject/word-count`
 * **Role:** Performs granular textual calculations (counting total words, sentences, unique vocabulary, and computing relative averages). 
-* **Lifecycle:** Elastic and on-demand. Spawns dynamically via `PluginManager` only when a `text.wordcount` capability invocation occurs, and terminates automatically after a 60-second idle period.
+* **Lifecycle:** Elastic and on-demand. Spawns dynamically via the `PluginManager` interceptor only when a `text.wordcount` capability invocation occurs, and terminates automatically after a 60-second idle period.
 * **Events Published:**
   * `capability.result` (transmitting JSON-formatted string metrics back to the orchestrator).
 * **Events Consumed:**
@@ -91,74 +94,82 @@ The table below maps the complete step-by-step transaction life cycle as events 
 
 ## 4. Processing Flow Schema
 
-The diagram below details the interaction model across the asynchronous boundaries of the system. Note how the Kernel intercepts the initial transaction, routes it to the persistent `SummaryAgent`, boots the `WordCountTool` on-demand, and returns the final response using nested correlation structures.
+The diagram below details the interaction model across the asynchronous boundaries of the system. Note how the Kernel intercepts the initial transaction, routes it to the persistent `SummaryAgent`, boots the `WordCountTool` on-demand using event-driven spawner requests, and returns the final response.
 
 ```
-+--------------+               +---------------+               +──────────────+               +───────────────+
-|  DemoRunner  |               |  Kernel Core  |               | SummaryAgent |               | WordCountTool |
-+──────┬───────+               +───────┬───────+               +──────┬───────+               +───────┬───────+
-       │                               │                              │                               │
-       │  1. capability.invoke         │                              │                               │
-       │     (name="text.analyze")     │                              │                               │
-       ├──────────────────────────────►│                              │                               │
-       │                               │                              │                               │
-       │                               │──┐ [Record correlation mapping]                              │
-       │                               │  │ pendingRoutes["corr-demo-1"] = "demo-runner"              │
-       │                               │◄─┘                           │                               │
-       │                               │                              │                               │
-       │                               │  2. message.summary-agent    │                               │
-       │                               ├─────────────────────────────►│                               │
-       │                               │                              │                               │
-       │                               │                              │──┐ [Process Text]             │
-       │                               │                              │  │ Generate sub-corrId:       │
-       │                               │                              │  │ "corr-sub-word-1"          │
-       │                               │                              │◄─┘                            │
-       │                               │                              │                               │
-       │                               │  3. capability.invoke        │                               │
-       │                               │     (name="text.wordcount")  │                               │
-       │                               │◄─────────────────────────────┤                               │
-       │                               │                              │                               │
-       │                               │──┐ [Record correlation mapping]                              │
-       │                               │  │ pendingRoutes["corr-sub-word-1"] = "summary-agent"        │
-       │                               │◄─┘                           │                               │
-       │                               │                              │                               │
-       │                               │──┐ [PluginManager Checks Tool Status]                        │
-       │                               │  │ IF WordCountTool offline:                                 │
-       │                               │  │ Exec "jbang WordCountTool.java"                            │
-       │                               │◄─┘                           │                               │
-       │                               │                                                              │
-       │                               │  4. capability.tool.text.wordcount                           │
-       │                               ├─────────────────────────────────────────────────────────────►│
-       │                               │                                                              │
-       │                               │                                                              │──┐ [Execute word counting]
-       │                               │                                                              │  │ Parse text tokens
-       │                               │                                                              │◄─┘
-       │                               │                                                              │
-       │                               │  5. capability.result (raw json metrics)                      │
-       │                               │◄─────────────────────────────────────────────────────────────┤
-       │                               │                                                              │
-       │                               │──┐ [Lookup Destination for "corr-sub-word-1"]                │
-       │                               │  │ Resolves to "summary-agent"                               │
-       │                               │◄─┘                           │                               │
-       │                               │                              │                               │
-       │                               │  6. capability.result        │                               │
-       │                               ├─────────────────────────────►│                               │
-       │                               │                              │                               │
-       │                               │                              │──┐ [Compile Final Report]     │
-       │                               │                              │  │ Match via sub-corrId       │
-       │                               │  │ Format report string       │                              │
-       │                               │                              │◄─┘                            │
-       │                               │                              │                               │
-       │                               │  7. capability.result (consolidated report)                  │
-       │                               │◄─────────────────────────────┤                               │
-       │                               │                              │                               │
-       │                               │──┐ [Lookup Destination for "corr-demo-1"]                     │
-       │                               │  │ Resolves to "demo-runner"                                 │
-       │                               │◄─┘                           │                               │
-       │                               │                              │                               │
-       │                               │  8. capability.result        │                               │
-       │◄──────────────────────────────┤                              │                               │
-       │                               │                              │                               │
++--------------+            +───────────────+            +──────────────+            +───────────────+            +───────────────+
+|  DemoRunner  |            |  Kernel Core  |            | SummaryAgent |            | PluginManager |            | WordCountTool |
++──────┬───────+            +───────┬───────+            +──────┬───────+            +───────┬───────+            +───────┬───────+
+       │                            │                           │                            │                            │
+       │  1. capability.invoke      │                           │                            │                            │
+       │     (name="text.analyze")  │                           │                            │                            │
+       ├───────────────────────────►│                           │                            │                            │
+       │                            │                           │                            │                            │
+       │                            │──┐ [Record correlation]   │                            │                            │
+       │                            │  │ pendingRoutes[corrA]   │                            │                            │
+       │                            │  │   = "demo-runner"      │                            │                            │
+       │                            │◄─┘                        │                            │                            │
+       │                            │                           │                            │                            │
+       │                            │  2. message.summary-agent │                            │                            │
+       │                            ├──────────────────────────►│                            │                            │
+       │                            │                           │                            │                            │
+       │                            │                           │──┐ [Process Text]          │                            │
+       │                            │                           │  │ Generate sub-corrId:    │                            │
+       │                            │                           │  │ "corr-sub-word-1"       │                            │
+       │                            │                           │◄─┘                         │                            │
+       │                            │                           │                            │                            │
+       │                            │  3. capability.invoke     │                            │                            │
+       │                            │     (name="text.wordcount"│                            │                            │
+       │                            │◄──────────────────────────┤                            │                            │
+       │                            │                           │                            │                            │
+       │                            │──┐ [Record correlation]   │                            │                            │
+       │                            │  │ pendingRoutes[corrB]   │                            │                            │
+       │                            │  │   = "summary-agent"    │                            │                            │
+       │                            │◄─┘                        │                            │                            │
+       │                            │                                                        │                            │
+       │                            │──┐ [CapabilityInterceptor detects offline provider]    │                            │
+       │                            │  │ 4. Broadcasts system.plugin.spawn event             │                            │
+       │                            │◄─┘                                                     │                            │
+       │                            │                                                        │                            │
+       │                            │  5. system.plugin.spawn                                │                            │
+       │                            ├───────────────────────────────────────────────────────►│                            │
+       │                            │                                                        │                            │
+       │                            │                                                        │──┐ [Exec subprocess]       │
+       │                            │                                                        │  │ jbang WordCountTool.java│
+       │                            │                                                        │◄─┘                         │
+       │                            │                                                                                     │
+       │                            │  6. capability.tool.text.wordcount                                                  │
+       │                            ├────────────────────────────────────────────────────────────────────────────────────►│
+       │                            │                                                                                     │
+       │                            │                                                                                     │──┐ [Count words]
+       │                            │                                                                                     │  │ Parse tokens
+       │                            │                                                                                     │◄─┘
+       │                            │                                                                                     │
+       │                            │  7. capability.result (raw metrics)                                                 │
+       │                            │◄────────────────────────────────────────────────────────────────────────────────────┤
+       │                            │                                                                                     │
+       │                            │──┐ [Lookup Destination for corrB]                                                   │
+       │                            │  │ Resolves to "summary-agent"                                                      │
+       │                            │◄─┘                        │                            │                            │
+       │                            │                           │                            │                            │
+       │                            │  8. capability.result     │                            │                            │
+       │                            ├──────────────────────────►│                            │                            │
+       │                            │                           │                            │                            │
+       │                            │                           │──┐ [Compile Final Report]  │                            │
+       │                            │                           │  │ Match via sub-corrId    │                            │
+       │                            │                           │  │ Format report string    │                            │
+       │                            │                           │◄─┘                         │                            │
+       │                            │                           │                            │                            │
+       │                            │  9. capability.result (consolidated report)            │                            │
+       │                            │◄──────────────────────────┤                            │                            │
+       │                            │                                                        │                            │
+       │                            │──┐ [Lookup Destination for corrA]                                                   │
+       │                            │  │ Resolves to "demo-runner"                                                        │
+       │                            │◄─┘                        │                            │                            │
+       │                            │                           │                            │                            │
+       │                            │  10. capability.result    │                            │                            │
+       │◄───────────────────────────┤                           │                            │                            │
+       │                            │                           │                            │                            │
 ```
 
 ---

@@ -47,7 +47,7 @@ To transmit JSON payloads over a continuous Unix Domain Socket (UDS) byte stream
 ```
 ┌───────────────────────────┬───────────────────────────────────────────┐
 │ Length Header (4 Bytes)   │ Payload Content (N Bytes)                 │
-│ Big-Endian 32-bit Integer │ UTF-8 Encoded JSON KernelEvent String           │
+│ Big-Endian 32-bit Integer │ UTF-8 Encoded JSON KernelEvent String     │
 └───────────────────────────┴───────────────────────────────────────────┘
 ```
 
@@ -96,9 +96,9 @@ All data packets passing through the Kernel must conform to a standardized JSON 
 The Kernel leverages Java Virtual Threads (JDK 21+) to achieve high concurrency without the overhead of platform operating system threads.
 
 ### 1. Reader Thread (Per Connection)
-- When a socket connection is accepted, the Kernel spawns a dedicated Virtual Thread.
-- **Loop**: Reads incoming frames sequentially from `InputStream`.
-- **Action**: Passes parsed JSON events to the `Kernel.route()` routine.
+- When a UDS connection is accepted, the Kernel spawns a dedicated Virtual Thread.
+- **Loop**: Reads incoming frames sequentially from the socket `InputStream`.
+- **Action**: Passes parsed JSON events to `Kernel.route()`.
 - **Lifecycle**: Terminates when the client disconnects (EOF reached on stream).
 
 ### 2. Writer Queue and Thread (Per Connection)
@@ -106,13 +106,15 @@ The Kernel leverages Java Virtual Threads (JDK 21+) to achieve high concurrency 
 - A dedicated Virtual Thread (`runWriter`) blocks on the queue.
 - **Loop**: `writeQueue.take()` retrieves the next binary frame.
 - **Action**: Writes the frame to the socket `OutputStream` and flushes.
-- **Poison Pill Cleanup**: To shut down a connection safely, the Kernel pushes a special `POISON` byte array into the queue. Once the writer thread encounters the poison pill, it terminates the socket gracefully.
+- **Poison Pill Graceful Exit**: To shut down a connection safely, the Kernel pushes a special empty `POISON` byte array into the queue. Once the writer thread encounters it, the writer thread terminates immediately and closes the socket stream.
 
 ---
 
-## 5. KernelEvent Interception Pipeline (Callbacks)
+## 5. Dynamic Interception and Event Filtering Pipeline
 
-The MK8 Kernel-Extendido introduces a stateful interception pipeline. Interceptors are executed within `Kernel.route()` after logging the request but *before* matching subscriptions or executing broadcasts.
+The MK8 Kernel-Extendido introduces a fully pluggable event interception pipeline. Interceptors are loaded dynamically at boot based on the class names passed as positional arguments to `Kernel.java` (e.g. `jbang Kernel.java IdempotencyInterceptor CapabilityInterceptor PluginManager`). 
+
+Positional CLI interceptor classes are instantiated via reflection using their convention-based constructor `(KernelBus, KernelConfig) -> (KernelBus) -> ()` and automatically loaded into the active `interceptors` chain.
 
 ### Execution Chain Flow
 
@@ -120,30 +122,35 @@ The MK8 Kernel-Extendido introduces a stateful interception pipeline. Intercepto
 Incoming KernelEvent
      │
      ▼
- pendingRoutes Map Updated (For capability.invoke)
+  Convention Pre-Filtering via handles()
      │
-     ▼
-[IdempotencyInterceptor]
+     ├──[handles() returns false] ──────► [Skip Interceptor, evaluate next]
+     ▼ [handles() returns true]
+[IdempotencyInterceptor.intercept()]
      │
-     ├──[Cache Hit / Collapsed] ──► [Direct Send to Callers] ──► (Halt Routing)
+     ├──[Cache Hit / Collapsed] ────────► [Direct Route to Callers] ──► (Halt Routing)
      ▼ [Cache Miss / In-Flight Init]
-[CapabilityInterceptor]
+[CapabilityInterceptor.intercept()]
      │
-     ├──[No Live Provider] ──────► [runtime.spawnOnDemand()] ──► (Halt Routing)
+     ├──[No Live Provider] ─────────────► [Publish system.plugin.spawn]► (Halt Routing)
      ▼ [Active Provider Resolved]
+[PluginManager.intercept()]
+     │
+     ├──[Lifecycle spawn / usage request]►[Execute ProcessBuilder] ────► (Halt Routing)
+     ▼ [Event Ignored / Broadcast]
 Standard Broadcast Phase (Exact Match & Wildcard Prefix Search)
      │
      ▼
 Delivery to writeQueue of matching Plugins
 ```
 
-If any interceptor returns `true` from `intercept()`, the event is consumed. The routing loop stops instantly, preventing downstream interceptors and standard broadcasts from executing.
+If any interceptor returns `true` from `intercept()`, the event is consumed. The routing loop stops instantly, preventing subsequent interceptors and standard broadcasts from executing.
 
 ---
 
 ## 6. Dynamic Plugin Discovery
 
-Plugins are decoupled from the Kernel codebase and discovered dynamically at boot.
+Plugins are decoupled from the Kernel codebase and discovered dynamically by the `PluginManager` interceptor.
 
 ```mermaid
 flowchart TD
@@ -154,10 +161,12 @@ flowchart TD
     WalkDirs --> FindJSON[Locate plugin.json files]
     FindJSON --> ReadConfig[Parse JSON Config Details]
     ReadConfig --> IndexCaps[Index Capabilities and triggerEvent types]
-    IndexCaps --> End[Register into catalog lookup maps]
+    IndexCaps --> PublishCatalog[Publish system.catalog.entry event]
+    PublishCatalog --> End[CapabilityInterceptor builds local index]
 ```
 
-### Discovery Heuristics
+### Discovery and Handshake Heuristics
 1. **Root Resolution**: The Kernel walks up directories starting from the current working directory (`user.dir`) searching for a `kernel` subdirectory or a `Start.java` anchor.
-2. **Directory Scanning**: `PluginManager` walks the resolved project root recursively, filtering for files named `plugin.json` while explicitly ignoring the `kernel/` folder.
-3. **Hot Reloading**: When a `plugin.installed` event is published, `PluginManager.refresh()` performs a synchronous re-scan inline, refreshing the indexed mappings in real-time.
+2. **Directory Scanning**: `PluginManager` walks the resolved project root recursively (ignoring the `/kernel` folder).
+3. **Dynamic Catalog Publishing**: For every parsed capability, `PluginManager` broadcasts `system.catalog.entry` events. On scan completion, it publishes `system.catalog.ready`. The `CapabilityInterceptor` catches these events to populate its own local capability index dynamically, keeping the two components completely decoupled.
+4. **Hot Reloading**: Receiving `plugin.installed` or `system.catalog.refresh` re-triggers the scanning virtual thread in the background, updating registries in real-time.
