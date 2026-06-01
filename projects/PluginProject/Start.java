@@ -1,6 +1,6 @@
 ///usr/bin/env jbang "$0" "$@" ; exit $?
 //JAVA 21+
-//SOURCES ../../kernel/BootHelper.java
+//SOURCES ../../kernel/helpers/BootHelper.java
 
 import java.io.*;
 import java.nio.file.*;
