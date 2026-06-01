@@ -13,6 +13,10 @@ import java.util.concurrent.TimeUnit;
  * in the background, then runs Producer in the foreground. Both connect
  * directly to the Kernel UDS without PluginBase or plugin.json.
  *
+ * Can be invoked from any working directory:
+ *   jbang projects/SimpleProject/Start.java   (from project root)
+ *   jbang Start.java                          (from projects/SimpleProject/)
+ *
  * Logs:
  *   logs/start.log    — this runner + Producer output (tee'd to terminal)
  *   logs/kernel.log   — kernel stdout/stderr
@@ -21,10 +25,6 @@ import java.util.concurrent.TimeUnit;
 public class Start {
 
     private static final Path   SOCKET_PATH        = Path.of("/tmp/mk8/kernel.sock");
-    private static final File   START_LOG          = new File("logs/start.log");
-    private static final File   KERNEL_LOG         = new File("logs/kernel.log");
-    private static final File   CONSUMER_LOG       = new File("logs/consumer.log");
-    private static final String KERNEL_DIR         = "../../kernel";
     private static final long   SOCKET_TIMEOUT_MS  = 5_000;
     private static final long   CONSUMER_WARMUP_MS = 800;
     private static final long   CONSUMER_DRAIN_MS  = 500;
@@ -32,8 +32,17 @@ public class Start {
     private static final List<Process> bg = new ArrayList<>();
 
     public static void main(String[] args) throws Exception {
-        Files.createDirectories(Path.of("logs"));
-        setupLogging(START_LOG);
+        Path root    = findProjectRoot();
+        Path projDir = root.resolve("projects/SimpleProject");
+
+        File kernelDir  = root.resolve("kernel").toFile();
+        File logsDir    = projDir.resolve("logs").toFile();
+        File startLog   = new File(logsDir, "start.log");
+        File kernelLog  = new File(logsDir, "kernel.log");
+        File consumerLog= new File(logsDir, "consumer.log");
+
+        Files.createDirectories(logsDir.toPath());
+        setupLogging(startLog);
         Runtime.getRuntime().addShutdownHook(new Thread(Start::cleanup));
 
         try {
@@ -44,20 +53,20 @@ public class Start {
             System.out.println("=======================================================\n");
 
             System.out.println("[BOOT] Starting Kernel (no interceptors)...");
-            launchBackground(new File(KERNEL_DIR), KERNEL_LOG, "jbang", "Kernel.java");
+            launchBackground(kernelDir, kernelLog, "jbang", "Kernel.java");
 
             waitForSocket();
 
             System.out.println("[BOOT] Starting Consumer in the background...");
-            launchBackground(new File("."), CONSUMER_LOG, "jbang", "Consumer.java");
+            launchBackground(projDir.toFile(), consumerLog, "jbang", "Consumer.java");
             Thread.sleep(CONSUMER_WARMUP_MS);
 
             System.out.println("[BOOT] Starting Producer in the foreground...\n");
-            int exit = streamForeground(new File("."), "jbang", "Producer.java");
+            int exit = streamForeground(projDir.toFile(), "jbang", "Producer.java");
             System.out.println("\n[BOOT] Producer finished (exit=" + exit + ").");
 
             Thread.sleep(CONSUMER_DRAIN_MS);
-            printLog(CONSUMER_LOG);
+            printLog(consumerLog);
 
         } catch (InterruptedException e) {
             System.out.println("\n[BOOT] Interrupted.");
@@ -70,6 +79,17 @@ public class Start {
     }
 
     // ── Helpers ───────────────────────────────────────────────────────────────
+
+    /** Walks up from user.dir looking for a directory that contains kernel/Kernel.java. */
+    private static Path findProjectRoot() {
+        Path cwd = Path.of(System.getProperty("user.dir")).toAbsolutePath().normalize();
+        for (Path p = cwd; p != null; p = p.getParent()) {
+            if (Files.exists(p.resolve("kernel/Kernel.java")))
+                return p;
+        }
+        throw new IllegalStateException("[BOOT] Cannot locate project root from: " + cwd
+                + " — run jbang from anywhere inside the MK8 project tree.");
+    }
 
     private static void setupLogging(File logFile) throws IOException {
         var original  = System.out;

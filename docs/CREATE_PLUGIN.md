@@ -1,79 +1,198 @@
-# Creating a Plugin from Scratch
+# Creating a Custom Plugin
 
-This guide describes how to construct, configure, and register a new plugin for the MK8 MicroKernel. 
-
-As a reference, we will build a **Sentiment Analysis Tool** (`SentimentAnalysisTool`). This tool operates in **on-demand** mode, intercepts a custom trigger event, analyzes the sentiment of a text (Positive, Negative, or Neutral), and returns the results.
+This guide walks you through building a new plugin for the MK8 MicroKernel. Every plugin in the system — `WordCountTool`, `SummaryAgent`, `ConsolePlugin`, `Agent` — follows the same conventions described here.
 
 ---
 
-## 1. Directory Structure
+## What Is a Plugin?
 
-Every plugin must reside in its own dedicated directory under a specific project module within the `projects/` directory. This isolates dependencies and scope.
+A plugin is an independent OS process that connects to the Kernel over a Unix Domain Socket (UDS), declares what events it produces and consumes, and participates in the event bus. Plugins are completely decoupled from each other and from the Kernel internals — they only exchange `KernelEvent` frames over the socket.
 
-For our new tool, we will create its directory inside a new project `projects/SentimentProject`:
+The Kernel discovers plugins automatically by scanning `plugin.json` files under the project directory tree. No registration, no hardcoded lists, no annotations.
+
+---
+
+## The Two Files Every Plugin Needs
+
+A plugin is always exactly two files, nothing more:
+
 ```
-projects/SentimentProject/
-├── Start.java                      # Project boot runner
-└── sentiment-analysis/
-    ├── plugin.json                 # Declarative configuration and capability schemas
-    └── SentimentAnalysisTool.java  # Java executable source file
+my-plugin/
+├── MyPlugin.java    ← business logic
+└── plugin.json      ← identity, subscriptions, capabilities, launch config
 ```
 
 ---
 
-## 2. Configuration: `plugin.json`
+## Part 1 — `plugin.json`
 
-The `plugin.json` file declares the plugin metadata, lifecycle rules, launch parameters, and capability schemas. 
+### Required Fields
 
-Create `projects/SentimentProject/sentiment-analysis/plugin.json` containing:
+Every plugin must declare these fields:
 
 ```json
 {
-  "id": "sentiment-analysis",
-  "type": "tool",
-  "version": "1.0.0",
-  "description": "Analyzes the sentiment of a given text.",
+  "id":          "my-plugin",
+  "type":        "tool",
+  "version":     "1.0.0",
+  "description": "What this plugin does.",
+
   "lifecycle": {
-    "mode": "on-demand",
-    "idleTimeoutSeconds": 60
+    "mode": "on-demand"
   },
+
   "launch": {
-    "name": "SentimentAnalysis",
-    "command": ["jbang", "SentimentAnalysisTool.java"],
-    "order": 30
+    "name":    "MyPlugin",
+    "command": ["jbang", "MyPlugin.java"],
+    "order":   30
   },
-  "capabilities": [
-    {
-      "name": "text.sentiment",
-      "description": "Calculates the sentiment score of the text.",
-      "triggerEvent": "capability.tool.text.sentiment",
-      "bidWeight": 1.0
-    }
-  ],
-  "subscribes": [
-    "capability.tool.text.sentiment"
-  ],
-  "publishes": [
-    "capability.result"
-  ]
+
+  "subscribes": ["event.i.receive"],
+  "publishes":  ["event.i.emit"]
 }
 ```
 
-### Key Fields Explained
-- `lifecycle.mode`: Set to `"on-demand"` so the `PluginManager` interceptor only spawns the tool when `text.sentiment` is invoked, and terminates it automatically when idle.
-- `launch.command`: The command array used by `PluginManager` to start the process.
-- `capabilities[].triggerEvent`: For tools, this is the event type the kernel routes to the tool. The tool must subscribe to this exact type in its `subscribes` list.
+### Choosing the `type`
 
-> [!NOTE]
-> For a detailed reference of all configuration properties, boot order tiers, and block structures available in `plugin.json`, consult the [Plugin Configuration Schemas](PLUGIN_SCHEMAS.md) guide.
+| type | When to use |
+|---|---|
+| `tool` | Executes a pure function and returns a result. No LLM. No long-lived state. |
+| `agent` | Orchestrates, decides, and delegates. May use an LLM. Maintains state across requests. |
+| `system` | UI, console, or infrastructure. Does not expose capabilities. Uses broadcast pub/sub only. |
+
+### Choosing the `lifecycle.mode`
+
+| mode | When to use | Behavior |
+|---|---|---|
+| `on-demand` | Tools that are idle most of the time. | Spawned on the first invocation. Killed after `idleTimeoutSeconds` of inactivity. |
+| `persistent` | Agents, UIs, infrastructure. | Starts with the system. Never killed automatically. |
+
+```json
+"lifecycle": {
+  "mode": "on-demand",
+  "idleTimeoutSeconds": 120
+}
+```
+
+`idleTimeoutSeconds` is only meaningful for `on-demand` plugins. The `PluginManager` checks every 60 seconds and terminates processes that have been idle longer than this threshold.
+
+### Declaring Capabilities
+
+Tools and agents declare one or more capabilities. Each capability is a named function that other plugins can invoke through the `CapabilityInterceptor`.
+
+```json
+"capabilities": [
+  {
+    "name":         "my.capability.name",
+    "description":  "What it does.",
+    "triggerEvent": "capability.tool.my.name",
+    "bidWeight":    1.0,
+    "exclusive":    false,
+    "tags":         ["tag1", "tag2"]
+  }
+]
+```
+
+**`triggerEvent`** is the event type the `CapabilityInterceptor` publishes when a `capability.invoke` for this capability name is received. The plugin must subscribe to this exact event in the `subscribes` array.
+
+**No `triggerEvent`** means the plugin is an agent. The Kernel delivers invocations via a direct `message.<id>` frame instead.
+
+**`bidWeight`** is the base score used during multi-provider auctions. Higher weight = higher priority when multiple providers register the same capability.
+
+**`exclusive: true`** restricts the capability to a single registered provider at a time.
+
+**`tags`** are semantic labels used for tool discovery filtering.
+
+### Capability Fields — Quick Reference
+
+| Field | Type | Required | Description |
+|---|---|---|---|
+| `name` | string | Yes | Unique capability identifier, e.g. `text.wordcount` |
+| `description` | string | No | Human-readable description |
+| `triggerEvent` | string | Tools only | Event the plugin subscribes to for invocations |
+| `replyEvent` | string | No | Expected response event (usually `capability.result`) |
+| `bidWeight` | number | No (1.0) | Base bidding score for multi-provider auctions |
+| `exclusive` | boolean | No (false) | Restrict to one provider at a time |
+| `tags` | string[] | No | Semantic filter tags |
+| `internal` | boolean | No (false) | Hide from default tool discovery |
+| `inputSchema` | object | No | JSON Schema for input validation documentation |
+| `outputSchema` | object | No | JSON Schema for output structure documentation |
+
+### LLM Configuration (Agents Only)
+
+```json
+"llm": {
+  "model":       "google/gemini-flash",
+  "baseUrl":     "https://openrouter.ai/api/v1",
+  "apiKeyEnv":   "OPENROUTER_API_KEY",
+  "maxTokens":   4096,
+  "temperature": 0.3
+}
+```
+
+Never put the API key value in the file. Always use the name of an environment variable via `apiKeyEnv`. The plugin reads the actual key at runtime with `System.getenv(config.llmApiKeyEnv())`.
+
+### Agent Configuration (Agents Only)
+
+```json
+"agent": {
+  "maxRounds":             7,
+  "maxDelegations":        3,
+  "maxToolCalls":          10,
+  "maxConcurrentMissions": 5,
+  "negotiatingTimeoutSeconds": 120
+}
+```
+
+### Thinking Feedback (Optional, Agents Only)
+
+Emits a `chat.thinking` event while the agent is processing, so the UI can show a status message:
+
+```json
+"thinking": {
+  "background": "⏳ Still working on it. I'll notify you when ready!"
+}
+```
+
+### The `launch` Block
+
+Tells `PluginManager` how to start this plugin as a child process:
+
+```json
+"launch": {
+  "name":         "MyPlugin",
+  "command":      ["jbang", "MyPlugin.java"],
+  "order":        30,
+  "delayAfterMs": 0,
+  "interactive":  false
+}
+```
+
+| Field | Type | Required | Description |
+|---|---|---|---|
+| `name` | string | Yes | Short label; used as the log filename (`logs/MyPlugin.log`) |
+| `command` | string[] | Yes | Full JBang launch command |
+| `order` | integer | Yes | Boot tier — lower numbers start first |
+| `delayAfterMs` | integer | No (0) | Milliseconds to wait after this plugin starts |
+| `interactive` | boolean | No (false) | `true` maps to `inheritIO` — use for terminal UIs |
+
+**Boot tier convention:**
+
+| order | Tier | Examples |
+|---|---|---|
+| 10 | Logger / infra | System loggers |
+| 20 | System | Critical infrastructure plugins |
+| 30 | Tools | Pure utility functions |
+| 40 | Agents | LLM agents, orchestrators |
+| 50 | Interactive | Console UI, terminal front-ends |
 
 ---
 
-## 3. Implementation: `SentimentAnalysisTool.java`
+## Part 2 — The Java File
 
-Plugins use JBang to run without manual classpath configurations. They import the kernel's shared files using relative JBang `//SOURCES` directives pointing back to the core `kernel/` directory.
+### The Mandatory Structure
 
-Create `projects/SentimentProject/sentiment-analysis/SentimentAnalysisTool.java` containing:
+Every plugin follows the same three-method skeleton:
 
 ```java
 ///usr/bin/env jbang "$0" "$@" ; exit $?
@@ -84,214 +203,493 @@ Create `projects/SentimentProject/sentiment-analysis/SentimentAnalysisTool.java`
 //SOURCES ../../../kernel/interceptors/plugin/PluginConfig.java
 //SOURCES ../../../kernel/interceptors/plugin/PluginBase.java
 
-import com.fasterxml.jackson.databind.JsonNode;
 import java.io.OutputStream;
-import java.util.Map;
 
-/**
- * SentimentAnalysisTool — on-demand sentiment analysis tool.
- *
- * Demonstrates:
- *   - On-demand lifecycle execution
- *   - Custom triggerEvent interception
- *   - Simple rule-based sentiment calculation
- */
-public class SentimentAnalysisTool {
+public class MyPlugin {
+
+    static final String SOURCE_ID = "my-plugin"; // must match "id" in plugin.json
 
     public static void main(String[] args) throws Exception {
-        System.out.println("[SENTIMENT] Starting (on-demand)...");
-        new SentimentAnalysisTool().start();
+        KernelEvent.initLogging();
+        new MyPlugin().start();
     }
 
     void start() throws Exception {
-        // PluginBase.run loads config, connects UDS, registers capability, and runs event loop
         PluginBase.run("plugin.json", KernelEvent.DEFAULT_SOCKET, this::handle);
     }
 
     void handle(String json, OutputStream out) throws Exception {
         KernelEvent event = KernelEvent.MAPPER.readValue(json, KernelEvent.class);
-        if ("capability.tool.text.sentiment".equals(event.type())) {
-            handleSentiment(event, out);
+        switch (event.type()) {
+            case "my.trigger.event" -> handleTrigger(event, out);
         }
-    }
-
-    void handleSentiment(KernelEvent event, OutputStream out) throws Exception {
-        // Parse incoming payload
-        JsonNode payload = KernelEvent.MAPPER.readTree(event.payload());
-        String text = payload.path("text").asText("");
-        System.out.println("[SENTIMENT] Analyzing: " + text.length() + " chars");
-
-        // Execute sentiment analysis (rule-based heuristic)
-        String sentiment = calculateSentiment(text);
-
-        // Package result
-        String resultPayload = KernelEvent.MAPPER.writeValueAsString(Map.of(
-                "result", sentiment
-        ));
-
-        // Reply to the kernel using the origin event's correlationId and reply routing
-        PluginBase.publish(
-                KernelEvent.reply(event, "capability.result", resultPayload, "sentiment-analysis"),
-                out
-        );
-        System.out.println("[SENTIMENT] Done — sentiment=" + sentiment);
-    }
-
-    String calculateSentiment(String text) {
-        String lower = text.toLowerCase();
-
-        // Define simple token sets
-        String[] positiveWords = {"happy", "joy", "good", "great", "excellent", "pond", "frog", "splash"};
-        String[] negativeWords = {"sad", "bad", "terrible", "poor", "pain", "annoyed", "error"};
-
-        int score = 0;
-        for (String w : positiveWords) {
-            if (lower.contains(w)) score++;
-        }
-        for (String w : negativeWords) {
-            if (lower.contains(w)) score--;
-        }
-
-        if (score > 0) return "POSITIVE (score: +" + score + ")";
-        if (score < 0) return "NEGATIVE (score: " + score + ")";
-        return "NEUTRAL (score: 0)";
     }
 }
 ```
 
-> [!NOTE]
-> To understand the detailed anatomy of event records, tracing scopes, and all standardized event namespaces (e.g., `capability.*`, `system.*`, `chat.*`), check the [KernelEvent Taxonomy Reference](EVENTS.md).
+The `//SOURCES` path depth depends on how many levels below `kernel/` your plugin lives. Adjust the `../` prefix accordingly.
 
----
+`PluginBase.run()` handles everything repetitive: opens the UDS socket, sends `plugin.register` (with the current PID), sends `plugin.ready`, reads incoming frames, and dispatches each one to your `handle` method in a dedicated virtual thread. You only write `handle`.
 
-## 4. Integration into the Pipeline
+### Declaring Event Name Constants
 
-Integrating a newly developed plugin into an active application pipeline requires connecting its declared capabilities to higher-level orchestrator agents or dynamic routing boundaries. In the MK8 MicroKernel architecture, this integration is fully decoupled, event-driven, and governed by the Kernel's event loop and dynamic process manager.
+Never scatter string literals across the code. Declare all event type names as private constants at the top of the class:
 
----
-
-### The Problem It Solves
-
-Traditional software and microservice architectures coordinate dependencies using direct service calls or static request broker setups. This creates several structural drawbacks:
-
-| Architectural Metric | Traditional Coupled Pipelines (REST/gRPC/Imports) | MK8 Decoupled MicroKernel Pipeline |
-| :--- | :--- | :--- |
-| **Service Discovery** | Requires static registry endpoints, configuration management, or dedicated DNS layers. | **Zero-Configuration Dynamic Discovery:** Kernel scans local folders, reads `plugin.json` manifests, and indexes capabilities dynamically on boot. |
-| **Process Lifecycle** | Services must run continuously in memory, consuming background CPU/RAM regardless of use. | **Elastic On-Demand Lifecycles:** `PluginManager` launches the plugin process on demand and terminates it after an idle timeout. |
-| **Code Coupling** | Compile-time import coupling or heavy runtime dependency wrappers in client code. | **Semantic Messaging Interface:** Clients call capabilities purely by semantic namespace (e.g., `text.sentiment`), remaining agnostic of provider language, PID, or location. |
-| **Concurrency Control**| Custom client-side logic required for thread-safe fan-in, timeouts, and tracking correlation IDs. | **Asynchronous Correlated Boundaries:** Built-in transaction tracing using `correlationId` and `sessionId` managed through lightweight, thread-safe asynchronous routing. |
-| **Request Optimization**| Duplicate concurrent calls generate redundant network traffic and service load unless external caching is configured. | **Kernel-Level Request Collapsing:** Concurrent duplicate invokes are automatically collapsed into a single flight, with results cached and broadcast back to all callers. |
-
----
-
-### When to Use Pipeline Integration
-
-Pipeline integration should be selected over monolithic function calls or tight microservices coupling in the following scenarios:
-
-1. **Parallel Tool Orchestration (Fan-Out/Fan-In Pattern):**
-   * When an agent needs to invoke multiple separate utilities concurrently (e.g., executing word counting and sentiment analysis simultaneously) and synthesize a combined response once all tasks finish.
-2. **Multi-Stage Data Pipelines (Chaining Pattern):**
-   * When the output of one utility serves as the input of the next in a linear sequence (e.g., Text Extraction $\rightarrow$ Language Detection $\rightarrow$ Translation $\rightarrow$ Summarization).
-3. **Polyglot Extensibility:**
-   * When implementing system features in different runtimes (e.g., wrapping a Python machine-learning model alongside a Java parser and a Node.js scraper) without leaving the platform's unified event space.
-4. **Elastic Compute Management:**
-   * When hosting compute-heavy utilities that are used sporadically and should not persist in system memory.
-
----
-
-### End-to-End Execution Flow
-
-The sequence diagram below visualizes how the Kernel coordinates an asynchronous orchestration request. In this scenario, `DemoRunner` invokes a high-level `SummaryAgent`, which in turn triggers both `WordCountTool` and `SentimentAnalysisTool` concurrently, fanning their responses back into a unified report.
-
+```java
+static final String EVT_TRIGGER = "capability.tool.my.name";
+static final String EVT_RESULT  = "capability.result";
+static final String EVT_ERROR   = "capability.error";
+static final String SOURCE_ID   = "my-plugin";
 ```
-DemoRunner              Kernel KernelEvent Bus            SummaryAgent       WordCountTool   SentimentAnalysisTool
-    │                           │                        │                  │                    │
-    │  capability.invoke        │                        │                  │                    │
-    │  (name="text.analyze")    │                        │                  │                    │
-    ├──────────────────────────►│                        │                  │                    │
-    │                           │ pendingRoutes[corrA]   │                  │                    │
-    │                           │   = "demo-runner"      │                  │                    │
-    │                           │                        │                  │                    │
-    │                           │ message.summary-agent  │                  │                    │
-    │                           ├───────────────────────►│                  │                    │
-    │                           │                        │                  │                    │
-    │                           │                        │──┐ [Spawn sub-tasks]                  │
-    │                           │                        │  │ Generate unique corrIds:           │
-    │                           │                        │  │ - wordCountCorrId (corrB)          │
-    │                           │                        │  │ - sentimentCorrId (corrC)          │
-    │                           │                        │◄─┘                                    │
-    │                           │                        │                  │                    │
-    │                           │  capability.invoke     │                  │                    │
-    │                           │  (name="text.wordcount"│                  │                    │
-    │                           │   corrId=corrB)        │                  │                    │
-    │                           │◄───────────────────────┤                  │                    │
-    │                           │ pendingRoutes[corrB]   │                  │                    │
-    │                           │   = "summary-agent"    │                  │                    │
-    │                           │                        │                  │                    │
-    │                           │  capability.invoke     │                  │                    │
-    │                           │  (name="text.sentiment"│                  │                    │
-    │                           │   corrId=corrC)        │                  │                    │
-    │                           │◄───────────────────────┤                  │                    │
-    │                           │ pendingRoutes[corrC]   │                  │                    │
-    │                           │   = "summary-agent"    │                  │                    │
-    │                           │                        │                  │                    │
-    │                           │ [PluginManager boots   │                  │                    │
-    │                           │  both tools on-demand] │                  │                    │
-    │                           ├────────────────────────┼─────────────────►│                    │
-    │                           ├────────────────────────┼──────────────────┼───────────────────►│
-    │                           │                        │                  │                    │
-    │                           │                        │                  │ [Processes text]   │
-    │                           │  capability.result     │                  │                    │
-    │                           │  (from "word-count",   │                  │                    │
-    │                           │   corrId=corrB)        │                  │                    │
-    │                           │◄───────────────────────┼──────────────────┤                    │
-    │                           │ pendingRoutes[corrB]   │                  │                    │
-    │                           │   -> "summary-agent"   │                  │                    │
-    │                           │                        │                  │                    │
-    │                           │ message.summary-agent  │                  │                    │
-    │                           ├───────────────────────►│                  │                    │
-    │                           │                        │──┐ [Store WordCount result]           │
-    │                           │                        │  │ Match via corrId corrB             │
-    │                           │                        │◄─┘                                    │
-    │                           │                        │                  │                    │
-    │                           │                        │                  │ [Processes text]   │
-    │                           │  capability.result     │                  │                    │
-    │                           │  (from "sentiment",    │                  │                    │
-    │                           │   corrId=corrC)        │                  │                    │
-    │                           │◄───────────────────────┼──────────────────┼────────────────────┤
-    │                           │ pendingRoutes[corrC]   │                  │                    │
-    │                           │   -> "summary-agent"   │                  │                    │
-    │                           │                        │                  │                    │
-    │                           │ message.summary-agent  │                  │                    │
-    │                           ├───────────────────────►│                  │                    │
-    │                           │                        │──┐ [Store Sentiment result]           │
-    │                           │                        │  │ Match via corrId corrC             │
-    │                           │                        │  │ Fan-in complete: generate report   │
-    │                           │                        │◄─┘                                    │
-    │                           │                        │                  │                    │
-    │                           │  capability.result     │                  │                    │
-    │                           │  (aggregated report,   │                  │                    │
-    │                           │   corrId=corrA)        │                  │                    │
-    │                           │◄───────────────────────┤                  │                    │
-    │                           │ pendingRoutes[corrA]   │                  │                    │
-    │                           │   -> "demo-runner"     │                  │                    │
-    │                           │                        │                  │                    │
-    │  capability.result        │                        │                  │                    │
-    │  (final report to caller) │                        │                  │                    │
-    │◄──────────────────────────┤                        │                  │                    │
+
+### Publishing Events
+
+**Simple event** (no correlation — pub/sub broadcast):
+```java
+PluginBase.publish(
+    KernelEvent.of("my.output.event", payload, SOURCE_ID),
+    out);
+```
+
+**Reply to a request** (with correlation — required for capability results):
+```java
+PluginBase.publish(
+    KernelEvent.withCorrelation(
+        "capability.result", payload,
+        SOURCE_ID, event.correlationId(), event.sessionId()),
+    out);
+```
+
+Always use `withCorrelation` when responding to a `capability.invoke`. The `correlationId` is how the Kernel knows which caller to deliver the result to.
+
+**Publishing a capability error:**
+```java
+void publishError(KernelEvent origin, String reason, OutputStream out) {
+    try {
+        String payload = KernelEvent.MAPPER.writeValueAsString(Map.of("reason", reason));
+        PluginBase.publish(
+            KernelEvent.withCorrelation(
+                "capability.error", payload,
+                SOURCE_ID, origin.correlationId(), origin.sessionId()),
+            out);
+    } catch (Exception ignored) {}
+}
+```
+
+### Never Block the Event Loop
+
+`PluginBase` dispatches each incoming frame in a virtual thread. If your handler does anything slow — HTTP calls, LLM inference, database queries, `Thread.sleep` — launch it in a new virtual thread so the event loop stays responsive:
+
+```java
+void handle(String json, OutputStream out) throws Exception {
+    KernelEvent event = KernelEvent.MAPPER.readValue(json, KernelEvent.class);
+    if ("my.trigger".equals(event.type())) {
+        Thread.ofVirtual().start(() -> {
+            try {
+                String result = slowWork(event.payload());  // takes seconds
+                PluginBase.publish(KernelEvent.withCorrelation(
+                    "capability.result",
+                    KernelEvent.MAPPER.writeValueAsString(Map.of("result", result)),
+                    SOURCE_ID, event.correlationId(), event.sessionId()), out);
+            } catch (Exception e) {
+                publishError(event, e.getMessage(), out);
+            }
+        });
+    }
+}
+```
+
+### Run Actions Exactly Once (`plugin.ready`)
+
+`plugin.ready` can arrive multiple times — once per plugin that connects. Use `AtomicBoolean` to ensure initialization runs only on the first signal:
+
+```java
+final AtomicBoolean started = new AtomicBoolean(false);
+
+// inside handle():
+case "plugin.ready" -> {
+    if (started.compareAndSet(false, true))
+        Thread.ofVirtual().start(() -> initialize(out));
+}
+```
+
+### Reading Configuration from `PluginConfig`
+
+`PluginConfig.load("plugin.json")` gives you typed accessors for all fields:
+
+```java
+PluginConfig config = PluginConfig.load("plugin.json");
+
+config.id();               // "my-plugin"
+config.llmModel();         // "google/gemini-flash"
+config.llmBaseUrl();       // "https://openrouter.ai/api/v1"
+config.llmApiKeyEnv();     // "OPENROUTER_API_KEY"
+config.llmMaxTokens();     // 4096
+config.llmTemperature();   // 0.3
+config.thinkingBackground(); // "⏳ Still working..."
+config.capabilities();     // List of JsonNode capability entries
+config.raw();              // the full JsonNode tree
 ```
 
 ---
 
-### Step-by-Step Integration Guide
+## Part 3 — The Three Templates
 
-#### 1. Capability Discovery
-When the MicroKernel starts up, `PluginManager` searches the directories listed in the workspace (such as `/tools` and `/system`). If it encounters a new plugin directory containing a `plugin.json` manifest:
-1. It parses the JSON schema.
-2. It indexes all listed capabilities in its internal catalog.
-3. It associates the dynamic trigger events (e.g. `capability.tool.text.sentiment`) with the process launch instructions. `CapabilityInterceptor` consults this catalog when routing invocations.
+### Template A — Tool (on-demand)
 
-#### 2. Declaring Dependencies and Scope
-To participate in the pipeline, orchestrator agents or callers must register to receive results or event replies. This is achieved by:
-* Listing the target namespaces in the plugin's `subscribes` field (e.g., subscribing to `capability.result`).
-* Forwarding the parent transaction context by preserving the `sessionId` and routing responses back using correct correlation IDs.
+A pure function: receives a trigger event, does work, returns a result.
+
+**`WordCountTool.java` structure:**
+
+```java
+public class MyTool {
+
+    static final String EVT_TRIGGER = "capability.tool.my.op";
+    static final String SOURCE_ID   = "my-tool";
+
+    public static void main(String[] args) throws Exception {
+        KernelEvent.initLogging();
+        new MyTool().start();
+    }
+
+    void start() throws Exception {
+        PluginBase.run("plugin.json", KernelEvent.DEFAULT_SOCKET, this::handle);
+    }
+
+    void handle(String json, OutputStream out) throws Exception {
+        KernelEvent event = KernelEvent.MAPPER.readValue(json, KernelEvent.class);
+        if (!EVT_TRIGGER.equals(event.type())) return;
+
+        JsonNode payload = KernelEvent.MAPPER.readTree(event.payload());
+        String   input   = payload.path("input").asText("").trim();
+
+        if (input.isBlank()) {
+            publishError(event, "input field is required", out);
+            return;
+        }
+
+        // synchronous work — tools are stateless and fast
+        String result = process(input);
+
+        PluginBase.publish(KernelEvent.withCorrelation(
+            "capability.result",
+            KernelEvent.MAPPER.writeValueAsString(Map.of("result", result)),
+            SOURCE_ID, event.correlationId(), event.sessionId()), out);
+    }
+
+    String process(String input) {
+        return input.toUpperCase(); // replace with real logic
+    }
+
+    void publishError(KernelEvent origin, String reason, OutputStream out) {
+        try {
+            PluginBase.publish(KernelEvent.withCorrelation(
+                "capability.error",
+                KernelEvent.MAPPER.writeValueAsString(Map.of("reason", reason)),
+                SOURCE_ID, origin.correlationId(), origin.sessionId()), out);
+        } catch (Exception ignored) {}
+    }
+}
+```
+
+**`plugin.json`:**
+
+```json
+{
+  "id": "my-tool",
+  "type": "tool",
+  "version": "1.0.0",
+  "description": "Does my operation.",
+  "lifecycle": { "mode": "on-demand", "idleTimeoutSeconds": 120 },
+  "launch": {
+    "name": "MyTool",
+    "command": ["jbang", "MyTool.java"],
+    "order": 30
+  },
+  "capabilities": [
+    {
+      "name": "my.op",
+      "description": "Performs the operation.",
+      "triggerEvent": "capability.tool.my.op",
+      "bidWeight": 1.0
+    }
+  ],
+  "subscribes": ["capability.tool.my.op"]
+}
+```
+
+---
+
+### Template B — Agent (orchestrator)
+
+Receives requests, delegates to other capabilities, and assembles the final reply.
+
+**`SummaryAgent.java` structure:**
+
+```java
+public class MyAgent {
+
+    static final String EVT_REQUEST = "message.my-agent";    // direct delivery from CapabilityInterceptor
+    static final String EVT_RESULT  = "capability.result";
+    static final String EVT_ERROR   = "capability.error";
+    static final String SOURCE_ID   = "my-agent";
+
+    // maps inner correlationId → outer request context
+    final ConcurrentHashMap<String, PendingRequest> pending = new ConcurrentHashMap<>();
+
+    record PendingRequest(String outerCorrId, String sessionId) {}
+
+    public static void main(String[] args) throws Exception {
+        KernelEvent.initLogging();
+        new MyAgent().start();
+    }
+
+    void start() throws Exception {
+        PluginBase.run("plugin.json", KernelEvent.DEFAULT_SOCKET, this::handle);
+    }
+
+    void handle(String json, OutputStream out) throws Exception {
+        KernelEvent event = KernelEvent.MAPPER.readValue(json, KernelEvent.class);
+        switch (event.type()) {
+            case EVT_REQUEST -> handleRequest(event, out);
+            case EVT_RESULT  -> handleResult(event, out);
+            case EVT_ERROR   -> handleError(event, out);
+        }
+    }
+
+    void handleRequest(KernelEvent event, OutputStream out) throws Exception {
+        // Generate a new correlationId for the downstream tool call.
+        // Store the outer context so we can reply to the original caller
+        // once the tool result arrives.
+        String innerCorrId = UUID.randomUUID().toString();
+        pending.put(innerCorrId,
+            new PendingRequest(event.correlationId(), event.sessionId()));
+
+        String invokePayload = KernelEvent.MAPPER.writeValueAsString(Map.of(
+            "name",  "other.capability",
+            "input", event.payload()));
+
+        PluginBase.publish(KernelEvent.withCorrelation(
+            "capability.invoke", invokePayload,
+            SOURCE_ID, innerCorrId, event.sessionId()), out);
+    }
+
+    void handleResult(KernelEvent event, OutputStream out) throws Exception {
+        PendingRequest ctx = pending.remove(event.correlationId());
+        if (ctx == null) return; // result belongs to another agent
+
+        // build final response and reply to the original caller
+        String summary = buildSummary(event.payload());
+
+        PluginBase.publish(KernelEvent.withCorrelation(
+            "capability.result",
+            KernelEvent.MAPPER.writeValueAsString(Map.of("result", summary)),
+            SOURCE_ID, ctx.outerCorrId(), ctx.sessionId()), out);
+    }
+
+    void handleError(KernelEvent event, OutputStream out) throws Exception {
+        PendingRequest ctx = pending.remove(event.correlationId());
+        if (ctx == null) return;
+
+        PluginBase.publish(KernelEvent.withCorrelation(
+            "capability.error", event.payload(),
+            SOURCE_ID, ctx.outerCorrId(), ctx.sessionId()), out);
+    }
+
+    String buildSummary(String payload) { return payload; } // replace with real logic
+}
+```
+
+**`plugin.json`:**
+
+```json
+{
+  "id": "my-agent",
+  "type": "agent",
+  "version": "1.0.0",
+  "description": "Orchestrates requests and delegates to tools.",
+  "lifecycle": { "mode": "persistent" },
+  "launch": {
+    "name": "MyAgent",
+    "command": ["jbang", "MyAgent.java"],
+    "order": 40
+  },
+  "capabilities": [
+    {
+      "name": "my.agent.op",
+      "description": "Executes the main orchestration flow.",
+      "bidWeight": 1.0
+    }
+  ],
+  "subscribes": ["message.my-agent", "capability.result", "capability.error"]
+}
+```
+
+> Agents have **no `triggerEvent`** in their capability. The `CapabilityInterceptor` delivers invocations via `message.<id>` directly. The plugin subscribes to `message.my-agent` to receive them.
+
+---
+
+### Template C — System Plugin (pure pub/sub)
+
+No capabilities. Communicates via broadcast events only.
+
+**`MySystem.java` structure:**
+
+```java
+public class MySystem {
+
+    static final String EVT_INPUT  = "some.input.event";
+    static final String EVT_OUTPUT = "some.output.event";
+    static final String SOURCE_ID  = "my-system";
+
+    final AtomicBoolean started = new AtomicBoolean(false);
+
+    public static void main(String[] args) throws Exception {
+        KernelEvent.initLogging();
+        new MySystem().start();
+    }
+
+    void start() throws Exception {
+        PluginBase.run("plugin.json", KernelEvent.DEFAULT_SOCKET, this::handle);
+    }
+
+    void handle(String json, OutputStream out) throws Exception {
+        KernelEvent event = KernelEvent.MAPPER.readValue(json, KernelEvent.class);
+        switch (event.type()) {
+            case "plugin.ready" -> {
+                if (started.compareAndSet(false, true))
+                    Thread.ofVirtual().start(() -> initialize(out));
+            }
+            case EVT_INPUT -> handleInput(event, out);
+        }
+    }
+
+    void initialize(OutputStream out) { /* one-time startup logic */ }
+
+    void handleInput(KernelEvent event, OutputStream out) throws Exception {
+        PluginBase.publish(
+            KernelEvent.of(EVT_OUTPUT, event.payload(), SOURCE_ID), out);
+    }
+}
+```
+
+**`plugin.json`:**
+
+```json
+{
+  "id": "my-system",
+  "type": "system",
+  "version": "1.0.0",
+  "description": "Infrastructure or UI plugin.",
+  "lifecycle": { "mode": "persistent" },
+  "launch": {
+    "name": "MySystem",
+    "command": ["jbang", "MySystem.java"],
+    "order": 20
+  },
+  "subscribes": ["plugin.ready", "some.input.event"],
+  "publishes":  ["some.output.event"]
+}
+```
+
+---
+
+## Part 4 — How the Routing Works
+
+Understanding routing helps you write the right `subscribes` and `triggerEvent`.
+
+### Tool invocation flow
+
+```
+Caller publishes:
+  capability.invoke { name: "my.op", ... }
+
+CapabilityInterceptor:
+  looks up "my.op" in registry
+  re-publishes as "capability.tool.my.op"   ← triggerEvent
+
+MyTool receives:
+  "capability.tool.my.op"
+  processes it
+  publishes capability.result { correlationId: same }
+
+CapabilityInterceptor:
+  reads pendingRoutes[correlationId]
+  delivers result directly to original caller
+```
+
+### Agent invocation flow
+
+```
+Caller publishes:
+  capability.invoke { name: "my.agent.op", ... }
+
+CapabilityInterceptor:
+  no triggerEvent → delivers as "message.my-agent"
+
+MyAgent receives:
+  "message.my-agent"
+  creates innerCorrId
+  publishes capability.invoke { name: "other.cap", corrId: innerCorrId }
+
+OtherTool receives, processes, publishes capability.result { corrId: innerCorrId }
+
+MyAgent receives:
+  capability.result { corrId: innerCorrId }
+  looks up pending[innerCorrId] → outer context
+  publishes capability.result { corrId: outerCorrId }
+
+CapabilityInterceptor delivers to original caller
+```
+
+### Broadcast pub/sub flow (system plugins)
+
+```
+PluginA publishes "some.event"
+
+Kernel broadcasts to all subscribers of "some.event"
+
+PluginB (subscribed) receives it
+```
+
+No `correlationId` needed. No request-reply. Events flow one-way to all registered listeners.
+
+---
+
+## Part 5 — The `//SOURCES` Path
+
+The `//SOURCES` directives in your JBang header must point to the three shared kernel files. Adjust the relative path based on your plugin's location in the project tree:
+
+| Plugin location | `//SOURCES` prefix |
+|---|---|
+| `projects/MyProject/my-plugin/` | `../../../kernel/...` |
+| `projects/MyProject/` | `../../kernel/...` |
+| At project root | `kernel/...` |
+
+The three required sources are always:
+
+```java
+//SOURCES <prefix>/KernelEvent.java
+//SOURCES <prefix>/interceptors/plugin/PluginConfig.java
+//SOURCES <prefix>/interceptors/plugin/PluginBase.java
+```
+
+---
+
+## Checklist
+
+Before shipping your plugin, verify:
+
+- [ ] `plugin.json` has `id`, `type`, `version`, `description`, `lifecycle`, `launch`, `subscribes`
+- [ ] `SOURCE_ID` in the Java file matches `"id"` in `plugin.json`
+- [ ] `subscribes` in `plugin.json` includes every event type handled in the `switch`
+- [ ] Tool: `capabilities[].triggerEvent` is listed in `subscribes`
+- [ ] Agent without `triggerEvent`: `subscribes` includes `"message.<id>"`
+- [ ] Long-running work is wrapped in `Thread.ofVirtual().start(...)`
+- [ ] Capability replies use `KernelEvent.withCorrelation(...)` with the original `correlationId`
+- [ ] Capability errors publish `"capability.error"` with `withCorrelation`
+- [ ] One-time initialization uses `AtomicBoolean.compareAndSet(false, true)`
+- [ ] LLM API key is read from an environment variable, not hardcoded
+- [ ] `//SOURCES` paths point to the correct `kernel/` location
+- [ ] `launch.command` in `plugin.json` matches the `.java` filename
+- [ ] `launch.order` follows the boot tier convention (tools=30, agents=40, UI=50)

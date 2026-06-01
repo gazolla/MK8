@@ -13,6 +13,10 @@ import java.util.concurrent.TimeUnit;
  * background, then hands control to the Console with inherited IO so the user
  * gets a clean interactive terminal. Exits when the user types /quit.
  *
+ * Can be invoked from any working directory:
+ *   jbang projects/ChatAI/Start.java   (from project root)
+ *   jbang Start.java                   (from projects/ChatAI/)
+ *
  * Logs:
  *   logs/kernel.log    — kernel stdout/stderr
  *   logs/assistant.log — agent stdout/stderr
@@ -20,40 +24,46 @@ import java.util.concurrent.TimeUnit;
 public class Start {
 
     private static final Path   SOCKET_PATH       = Path.of("/tmp/mk8/kernel.sock");
-    private static final File   KERNEL_LOG        = new File("logs/kernel.log");
-    private static final File   ASSISTANT_LOG     = new File("logs/assistant.log");
-    private static final String KERNEL_DIR        = "../../kernel";
-    private static final String AGENT_DIR         = "agent";
-    private static final String CONSOLE_DIR       = "console";
     private static final long   SOCKET_TIMEOUT_MS = 5_000;
     private static final long   AGENT_WARMUP_MS   = 2_000;
 
     private static final List<Process> bg = new ArrayList<>();
 
     public static void main(String[] args) throws Exception {
-        Files.createDirectories(Path.of("logs"));
+        // Locate the project root (dir containing kernel/Kernel.java) by walking up from cwd.
+        Path root = findProjectRoot();
+
+        Path chatAiDir   = root.resolve("projects/ChatAI");
+        File kernelDir   = root.resolve("kernel").toFile();
+        File agentDir    = chatAiDir.resolve("agent").toFile();
+        File consoleDir  = chatAiDir.resolve("console").toFile();
+        File logsDir     = chatAiDir.resolve("logs").toFile();
+        File kernelLog   = new File(logsDir, "kernel.log");
+        File assistantLog= new File(logsDir, "assistant.log");
+
+        Files.createDirectories(logsDir.toPath());
         Runtime.getRuntime().addShutdownHook(new Thread(Start::cleanup));
 
         try {
             Files.deleteIfExists(SOCKET_PATH);
 
             System.out.println("[BOOT] Starting Kernel...");
-            launchBackground(new File(KERNEL_DIR), KERNEL_LOG,
+            launchBackground(kernelDir, kernelLog,
                     "jbang", "Kernel.java",
-                    "--logs="  + new File("logs").getAbsolutePath(),
-                    "--scan="  + new File(".").getAbsolutePath(),
+                    "--logs="  + logsDir.getAbsolutePath(),
+                    "--scan="  + chatAiDir.toFile().getAbsolutePath(),
                     "IdempotencyInterceptor", "CapabilityInterceptor", "PluginManager");
 
             waitForSocket();
 
             System.out.println("[BOOT] Starting Assistant in the background...");
-            launchBackground(new File(AGENT_DIR), ASSISTANT_LOG,
+            launchBackground(agentDir, assistantLog,
                     "jbang", "Agent.java");
             Thread.sleep(AGENT_WARMUP_MS);
 
             System.out.println("[BOOT] Starting Console...\n");
             Process console = new ProcessBuilder("jbang", "ConsolePlugin.java")
-                    .directory(new File(CONSOLE_DIR))
+                    .directory(consoleDir)
                     .inheritIO()
                     .start();
             bg.add(console);
@@ -69,6 +79,17 @@ public class Start {
     }
 
     // ── Helpers ───────────────────────────────────────────────────────────────
+
+    /** Walks up from user.dir looking for a directory that contains kernel/Kernel.java. */
+    private static Path findProjectRoot() {
+        Path cwd = Path.of(System.getProperty("user.dir")).toAbsolutePath().normalize();
+        for (Path p = cwd; p != null; p = p.getParent()) {
+            if (Files.exists(p.resolve("kernel/Kernel.java")))
+                return p;
+        }
+        throw new IllegalStateException("[BOOT] Cannot locate project root from: " + cwd
+                + " — run jbang from anywhere inside the MK8 project tree.");
+    }
 
     private static void waitForSocket() throws Exception {
         System.out.print("[BOOT] Waiting for Kernel UDS socket...");

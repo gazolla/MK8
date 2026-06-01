@@ -13,6 +13,10 @@ import java.util.concurrent.TimeUnit;
  * CapabilityInterceptor, PluginManager), starts SummaryAgent in the background,
  * then runs DemoRunner in the foreground to validate the full pipeline.
  *
+ * Can be invoked from any working directory:
+ *   jbang projects/InterceptorsProject/Start.java   (from project root)
+ *   jbang Start.java                                (from projects/InterceptorsProject/)
+ *
  * Logs:
  *   logs/start.log         — this runner + DemoRunner output (tee'd to terminal)
  *   logs/kernel.log        — kernel stdout/stderr
@@ -21,20 +25,25 @@ import java.util.concurrent.TimeUnit;
 public class Start {
 
     private static final Path   SOCKET_PATH       = Path.of("/tmp/mk8/kernel.sock");
-    private static final File   START_LOG         = new File("logs/start.log");
-    private static final File   KERNEL_LOG        = new File("logs/kernel.log");
-    private static final File   SUMMARY_AGENT_LOG = new File("logs/summary-agent.log");
-    private static final String KERNEL_DIR        = "../../kernel";
-    private static final String SUMMARY_AGENT_DIR = "summary-agent";
-    private static final String DEMO_RUNNER_DIR   = "demo-runner";
     private static final long   SOCKET_TIMEOUT_MS = 5_000;
     private static final long   AGENT_WARMUP_MS   = 1_000;
 
     private static final List<Process> bg = new ArrayList<>();
 
     public static void main(String[] args) throws Exception {
-        Files.createDirectories(Path.of("logs"));
-        setupLogging(START_LOG);
+        Path root    = findProjectRoot();
+        Path projDir = root.resolve("projects/InterceptorsProject");
+
+        File kernelDir      = root.resolve("kernel").toFile();
+        File summaryAgentDir= projDir.resolve("summary-agent").toFile();
+        File demoRunnerDir  = projDir.resolve("demo-runner").toFile();
+        File logsDir        = projDir.resolve("logs").toFile();
+        File startLog       = new File(logsDir, "start.log");
+        File kernelLog      = new File(logsDir, "kernel.log");
+        File summaryAgentLog= new File(logsDir, "summary-agent.log");
+
+        Files.createDirectories(logsDir.toPath());
+        setupLogging(startLog);
         Runtime.getRuntime().addShutdownHook(new Thread(Start::cleanup));
 
         try {
@@ -45,19 +54,19 @@ public class Start {
             System.out.println("=======================================================\n");
 
             System.out.println("[BOOT] Starting Kernel (IdempotencyInterceptor CapabilityInterceptor PluginManager)...");
-            launchBackground(new File(KERNEL_DIR), KERNEL_LOG,
+            launchBackground(kernelDir, kernelLog,
                     "jbang", "Kernel.java",
-                    "--logs=" + new File("logs").getAbsolutePath(),
+                    "--logs=" + logsDir.getAbsolutePath(),
                     "IdempotencyInterceptor", "CapabilityInterceptor", "PluginManager");
 
             waitForSocket();
 
             System.out.println("[BOOT] Starting SummaryAgent in the background...");
-            launchBackground(new File(SUMMARY_AGENT_DIR), SUMMARY_AGENT_LOG, "jbang", "SummaryAgent.java");
+            launchBackground(summaryAgentDir, summaryAgentLog, "jbang", "SummaryAgent.java");
             Thread.sleep(AGENT_WARMUP_MS);
 
             System.out.println("[BOOT] Executing DemoRunner in the foreground...\n");
-            int exit = streamForeground(new File(DEMO_RUNNER_DIR), "jbang", "DemoRunner.java");
+            int exit = streamForeground(demoRunnerDir, "jbang", "DemoRunner.java");
             System.out.println("\n[BOOT] DemoRunner finished with exit code: " + exit);
 
         } catch (InterruptedException e) {
@@ -71,6 +80,17 @@ public class Start {
     }
 
     // ── Helpers ───────────────────────────────────────────────────────────────
+
+    /** Walks up from user.dir looking for a directory that contains kernel/Kernel.java. */
+    private static Path findProjectRoot() {
+        Path cwd = Path.of(System.getProperty("user.dir")).toAbsolutePath().normalize();
+        for (Path p = cwd; p != null; p = p.getParent()) {
+            if (Files.exists(p.resolve("kernel/Kernel.java")))
+                return p;
+        }
+        throw new IllegalStateException("[BOOT] Cannot locate project root from: " + cwd
+                + " — run jbang from anywhere inside the MK8 project tree.");
+    }
 
     private static void setupLogging(File logFile) throws IOException {
         var original  = System.out;

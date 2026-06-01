@@ -13,6 +13,10 @@ import java.util.concurrent.TimeUnit;
  * in the background, then runs Producer in the foreground. After the Producer
  * finishes, prints the Consumer log so both outputs are visible together.
  *
+ * Can be invoked from any working directory:
+ *   jbang projects/PluginProject/Start.java   (from project root)
+ *   jbang Start.java                          (from projects/PluginProject/)
+ *
  * Logs:
  *   logs/start.log    — this runner + Producer output (tee'd to terminal)
  *   logs/kernel.log   — kernel stdout/stderr
@@ -21,12 +25,6 @@ import java.util.concurrent.TimeUnit;
 public class Start {
 
     private static final Path   SOCKET_PATH        = Path.of("/tmp/mk8/kernel.sock");
-    private static final File   START_LOG          = new File("logs/start.log");
-    private static final File   KERNEL_LOG         = new File("logs/kernel.log");
-    private static final File   CONSUMER_LOG       = new File("logs/consumer.log");
-    private static final String KERNEL_DIR         = "../../kernel";
-    private static final String CONSUMER_DIR       = "consumer";
-    private static final String PRODUCER_DIR       = "producer";
     private static final long   SOCKET_TIMEOUT_MS  = 5_000;
     private static final long   CONSUMER_WARMUP_MS = 1_000;
     private static final long   CONSUMER_DRAIN_MS  = 800;
@@ -34,8 +32,19 @@ public class Start {
     private static final List<Process> bg = new ArrayList<>();
 
     public static void main(String[] args) throws Exception {
-        Files.createDirectories(Path.of("logs"));
-        setupLogging(START_LOG);
+        Path root    = findProjectRoot();
+        Path projDir = root.resolve("projects/PluginProject");
+
+        File kernelDir  = root.resolve("kernel").toFile();
+        File consumerDir= projDir.resolve("consumer").toFile();
+        File producerDir= projDir.resolve("producer").toFile();
+        File logsDir    = projDir.resolve("logs").toFile();
+        File startLog   = new File(logsDir, "start.log");
+        File kernelLog  = new File(logsDir, "kernel.log");
+        File consumerLog= new File(logsDir, "consumer.log");
+
+        Files.createDirectories(logsDir.toPath());
+        setupLogging(startLog);
         Runtime.getRuntime().addShutdownHook(new Thread(Start::cleanup));
 
         try {
@@ -47,23 +56,24 @@ public class Start {
             System.out.println("=======================================================\n");
 
             System.out.println("[BOOT] Starting Kernel (PluginManager)...");
-            launchBackground(new File(KERNEL_DIR), KERNEL_LOG,
+            launchBackground(kernelDir, kernelLog,
                     "jbang", "Kernel.java",
-                    "--logs=" + new File("logs").getAbsolutePath(),
+                    "--logs=" + logsDir.getAbsolutePath(),
+                    "--scan=" + projDir.toFile().getAbsolutePath(),
                     "PluginManager");
 
             waitForSocket();
 
             System.out.println("[BOOT] Starting Consumer in the background...");
-            launchBackground(new File(CONSUMER_DIR), CONSUMER_LOG, "jbang", "Consumer.java");
+            launchBackground(consumerDir, consumerLog, "jbang", "Consumer.java");
             Thread.sleep(CONSUMER_WARMUP_MS);
 
             System.out.println("[BOOT] Starting Producer in the foreground...\n");
-            int exit = streamForeground(new File(PRODUCER_DIR), "jbang", "Producer.java");
+            int exit = streamForeground(producerDir, "jbang", "Producer.java");
             System.out.println("\n[BOOT] Producer finished (exit=" + exit + ").");
 
             Thread.sleep(CONSUMER_DRAIN_MS);
-            printLog(CONSUMER_LOG);
+            printLog(consumerLog);
 
         } catch (InterruptedException e) {
             System.out.println("\n[BOOT] Interrupted.");
@@ -76,6 +86,17 @@ public class Start {
     }
 
     // ── Helpers ───────────────────────────────────────────────────────────────
+
+    /** Walks up from user.dir looking for a directory that contains kernel/Kernel.java. */
+    private static Path findProjectRoot() {
+        Path cwd = Path.of(System.getProperty("user.dir")).toAbsolutePath().normalize();
+        for (Path p = cwd; p != null; p = p.getParent()) {
+            if (Files.exists(p.resolve("kernel/Kernel.java")))
+                return p;
+        }
+        throw new IllegalStateException("[BOOT] Cannot locate project root from: " + cwd
+                + " — run jbang from anywhere inside the MK8 project tree.");
+    }
 
     private static void setupLogging(File logFile) throws IOException {
         var original  = System.out;
