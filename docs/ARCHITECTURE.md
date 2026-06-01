@@ -80,10 +80,35 @@ The gateway server managing network sockets and connections. It is a pure, gener
 ### `KernelEvent.java`
 Defines the structure of messages, UDS length-prefixed framing, and shared logging infrastructure.
 - **Key Records**:
-  - `KernelEvent`: Unified event envelope record containing routing metadata fields (`correlationId`, `sessionId`, `traceId`, `spanId`).
+  - `KernelEvent`: Unified event envelope record containing routing metadata fields (`correlationId`, `sessionId`, `workflowId`, `replyTo`, `traceId`, `spanId`).
 - **Key Methods**:
   - `readFrame(InputStream in)`: Decodes big-endian headers and isolates JSON payloads.
   - `writeFrame(OutputStream out, String json)`: Encapsulates JSON strings into length-prefixed frames.
+  - `initLogging()`: Installs `TimestampPrintStream` on `System.out` and `System.err`. Safe to call multiple times — guarded by a system property flag.
+- **`TimestampPrintStream`** (inner class): A `PrintStream` decorator that prepends every output line with a `[yyyy-MM-dd HH:mm:ss.SSS]` timestamp. Installed automatically at class init and by `initLogging()`. Plugins should call `KernelEvent.initLogging()` explicitly at the top of `main()` instead of relying on static initializer ordering.
+- **ThreadLocals**:
+  - `CURRENT_TRACE_ID`: Per-virtual-thread holder for the active `traceId`.
+  - `CURRENT_SPAN_ID`: Per-virtual-thread holder for the active `spanId`. Both are set by `PluginBase` when dispatching incoming frames and cleared on thread exit.
+
+---
+
+## 3b. Supporting Infrastructure Types
+
+### `Connection`
+Manages a single plugin's socket channel and outbound write queue. One `Connection` is created per accepted UDS client in `Kernel.handleClient()`.
+- **Fields**: `pluginId` (String), `channel` (SocketChannel), `writeQueue` (LinkedBlockingQueue<byte[]>).
+- **Writer Thread**: The constructor starts a dedicated Virtual Thread (`runWriter`) that blocks on `writeQueue.take()` and writes each byte frame to the socket `OutputStream`. If `channel` is `null` (the synthetic `KERNEL_SOURCE` connection), the writer thread is not started.
+- **`POISON` Sentinel**: A static `byte[0]` constant. `shutdown()` puts it onto the `writeQueue`; when `runWriter` dequeues it, the writer thread exits cleanly.
+- **`shutdown()`**: Called by `Kernel.unregister()` to signal the writer thread to stop after all queued frames have been delivered.
+
+### `PrefixRoute`
+A lightweight record pairing a prefix string with its target `Connection`. Stored in `Kernel.prefixRoutes` (`CopyOnWriteArrayList<PrefixRoute>`). During broadcast, the Kernel iterates this list and enqueues any event whose `type` starts with the stored prefix.
+
+### `KernelConfig`
+A record (`Path scanRoot, Path logsOverride`) resolved at boot and passed to interceptor constructors declared as `(KernelBus bus, KernelConfig config)`. `scanRoot` is the project root used by `PluginManager` for `plugin.json` discovery; `logsOverride` is an optional explicit log directory.
+
+### `KernelBusImpl`
+The concrete implementation of `KernelBus` backed by a `Kernel` instance. Provides interceptors with `sendTo()` (direct enqueue bypassing routing), `route()` (re-enters the full kernel pipeline with a synthetic `KERNEL_SOURCE` connection), `addPendingRoute()`, and `removePendingRoute()`.
 
 ---
 

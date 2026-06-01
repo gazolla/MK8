@@ -68,10 +68,14 @@ All data packets passing through the Kernel must conform to a standardized JSON 
 - `source` (string): Unique identifier of the originating plugin.
 - `correlationId` (string): Correlation key used to route responses back to callers asynchronously.
 - `sessionId` (string): Conversation context identifier.
-- `workflowId` (string): Workflow execution path tracker.
-- `replyTo` (string): Intended recipient plugin ID.
+- `workflowId` (string): Workflow execution path tracker. Propagated by `KernelEvent.reply()` to preserve workflow context across event chains.
+- `replyTo` (string): Intended recipient plugin ID. Optional hint field; routing is handled via `correlationId` and `pendingRoutes`, not this field.
 - `traceId` (string): Distributed tracing transactional identifier.
 - `spanId` (string): Distributed tracing execution step identifier.
+
+### Logging Infrastructure — `TimestampPrintStream`
+
+`KernelEvent.TimestampPrintStream` is a `PrintStream` decorator installed on `System.out` and `System.err` via `KernelEvent.initLogging()`. Every output line is prefixed with a `[yyyy-MM-dd HH:mm:ss.SSS]` timestamp. The install is idempotent — guarded by the `mk8.logging.redirected` system property so multiple calls from different class initializers do not stack decorators. Plugins should call `KernelEvent.initLogging()` explicitly at the top of `main()` rather than relying on the static initializer order (which varies by JVM class-loading sequence).
 
 ### KernelEvent Payload Example
 

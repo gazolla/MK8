@@ -22,6 +22,7 @@ The `CapabilityInterceptor` manages the following structural tasks:
 
 `CapabilityInterceptor` is designed to be fully thread-safe, supporting concurrent registrations and lookups from high-performance virtual thread tasks:
 
+* **`builtins` Map:** Maps built-in capability names to `BuiltInHandler` lambdas. Currently contains one entry: `"system.capability.list"` → `buildCapabilityList()`. Built-in handlers are resolved first in `handleInvoke()` before consulting live `registrations`, so they take priority and require no registered plugin provider.
 * **`registrations` Map:** Maps `capabilityName` to a `CopyOnWriteArrayList<Registration>` of live providers. A `Registration` holds `pluginId`, `triggerEvent` (null for agents), and `bidWeight`.
 * **`pendingInvokes` Map:** Maps `capabilityName` to a list of queued `capability.invoke` events waiting for an on-demand plugin to start and register.
 * **`localCatalog` Map:** Maps capability name to a `CatalogEntry` populated via system catalog events.
@@ -104,4 +105,12 @@ The flow diagram below details how the `CapabilityInterceptor` coordinates a rea
 * **Description:** Selects the winner with the highest effective score (`score × (1 - load)`). Falls back to the first candidate if no bids arrived. Calls `routeToProvider()`.
 
 #### `String buildCapabilityList()`
-* **Description:** Returns a JSON array merging live registrations (`"live": true`) with catalog entries for capabilities not currently running (`"live": false`). Handled dynamically when `system.capability.list` is invoked. merging live registrations (`"live": true`) with catalog entries for capabilities not currently running (`"live": false`).
+* **Description:** Returns a JSON array merging live registrations (`"live": true`) with catalog entries for capabilities not currently running (`"live": false`). Invoked as a built-in handler when `capability.invoke { name: "system.capability.list" }` is received — no plugin process is required.
+
+---
+
+### D. Capability Query
+
+#### `void handleQuery(KernelEvent event)`
+* **Description:** Handles `capability.query` events. The event payload is treated as a raw capability name string. Returns a `capability.query.result` event whose payload is `{"capability": "<name>", "providers": ["pluginId1", ...]}` — a list of all currently registered provider plugin IDs for that capability. Result is routed back via `bus.route()` using `KernelEvent.reply()` so it inherits the original `correlationId` and `sessionId`.
+* **Return value in `intercept()`:** `true` (event consumed, not broadcast).

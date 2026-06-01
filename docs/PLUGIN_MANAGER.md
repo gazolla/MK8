@@ -77,7 +77,7 @@ One entry per running child process.
 * **Description:** Triggered upon intercepting `system.plugin.spawn`. Launches the on-demand process that provides `capName`.
 1. Looks up the `CatalogEntry`; exits if missing or not `onDemand`.
 2. If already in `managed`, publishes `system.plugin.spawned` and returns (idempotent draining).
-3. Guards against concurrent launches using the `spawning` lock set.
+3. Checks the `spawning` set (a `ConcurrentHashMap.newKeySet()`) via atomic `add()`. If the plugin ID is already present, another thread is already launching it — returns immediately to prevent double-spawn. The set entry is always removed in a `finally` block after spawn completes or fails.
 4. Builds `ProcessBuilder` with JBang commands, sets execution directory to `pluginDir`, redirects output to `logs/<pluginId>.log`, and starts the process.
 5. Saves `ManagedProcess`, registers `process.onExit()` callback to publish `system.plugin.died` in case of sudden crashes, and publishes `system.plugin.spawned`.
 

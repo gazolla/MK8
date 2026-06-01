@@ -7,30 +7,6 @@ Optionally, configurations can contain `"commands"` and `"launch"` blocks.
 
 ---
 
-## The `"commands"` Block — Dynamic Command Registration
-
-System or tool plugins can declare custom slash commands. The `SupervisorPlugin` collects these declarations dynamically during boot and exposes them in an integrated format via `/help` and `/list` commands.
-
-```json
-"commands": [
-  {
-    "name": "/plugins",
-    "description": "Display a table of all active plugins, process PIDs, and their statuses."
-  },
-  {
-    "name": "/restart <pluginId>",
-    "description": "Safely restart a specific system plugin."
-  }
-]
-```
-
-### Command Fields inside the `"commands"` Block
-
-| Field | Type | Required | Description |
-|---|---|---|---|
-| `name` | string | Yes | The complete slash command starting with `/` (e.g., `/plugins` or `/trace <sessionId>`) |
-| `description` | string | Yes | A short description detailing functionality and usage |
-
 ---
 
 ## Type: `"system"`
@@ -67,112 +43,44 @@ System plugins contain no `llm`, `agent`, or `capabilities` blocks.
 
 ## Type: `"tool"`
 
-Tool plugins contain no `llm` or `agent` blocks. They contain a `capabilities` block defining `inputSchema` and `outputSchema`.
+Tool plugins contain no `llm` or `agent` blocks. They declare capabilities in the `capabilities` block.
 
 The lifecycle mode is always `on-demand` accompanied by `idleTimeoutSeconds`. **Tools are not started at boot**. Instead, `PluginManager` spawns them on-demand when `CapabilityInterceptor` broadcasts a `system.plugin.spawn` event on the UDS bus during the first invocation. A tool must subscribe directly to its own capability `triggerEvent`.
 
 ```json
 {
-  "id": "filesystem-tool",
+  "id": "word-count",
   "type": "tool",
   "version": "1.0.0",
-  "description": "Sandboxed file system operations inside project root.",
+  "description": "Counts words, sentences and unique words in a text.",
 
   "lifecycle": {
     "mode": "on-demand",
-    "idleTimeoutSeconds": 300
+    "idleTimeoutSeconds": 60
+  },
+
+  "launch": {
+    "name": "WordCount",
+    "command": ["jbang", "WordCountTool.java"],
+    "order": 20
   },
 
   "capabilities": [
     {
-      "name": "tool.filesystem.op",
-      "description": "Execute a sandboxed file operation.",
-      "version": "1.0.0",
-      "triggerEvent": "capability.tool.filesystem.op",
-      "replyEvent": "capability.result",
-      "inputSchema": {
-        "required": ["op", "path"],
-        "optional": ["content", "target"],
-        "properties": {
-          "op":      { "type": "string", "enum": ["read","write","ls","exists","delete"] },
-          "path":    { "type": "string" },
-          "content": { "type": "string" },
-          "target":  { "type": "string" }
-        }
-      },
-      "outputSchema": {
-        "type": "string",
-        "description": "Operation result as plain text"
-      },
-      "exclusive": false,
-      "bidWeight": 1.0,
-      "tags": ["filesystem", "files", "io"]
+      "name": "text.wordcount",
+      "description": "Counts words in the given text.",
+      "triggerEvent": "capability.tool.text.wordcount",
+      "bidWeight": 1.0
     }
   ],
 
   "subscribes": [
-    "capability.tool.filesystem.op"
-  ],
-
-  "publishes": [
-    "capability.result"
+    "capability.tool.text.wordcount"
   ]
 }
 ```
 
-**Tool Routing Rule**: `CapabilityInterceptor` receives a `capability.invoke { name: "tool.filesystem.op" }` event, resolves the associated `triggerEvent`, and re-publishes it as `capability.tool.filesystem.op`. The target tool subscribes to this `triggerEvent` directly rather than to the generic `capability.invoke`.
-
-### Implemented Operations: `tool.filesystem.op`
-
-| op | Mandatory Parameters | Return |
-|---|---|---|
-| `read` | `path` | File content as a string |
-| `write` | `path`, `content` | `"written N chars to path"` |
-| `ls` | `path` (directory) | JSON array containing file names |
-| `exists` | `path` | `"true"` or `"false"` |
-| `delete` | `path` (file) | `"deleted path"` — fails if it does not exist or is a directory |
-
-### Path Resolution Rules (Sandbox and Global Read)
-
-The `FileSystemTool` operates under two distinct security scopes:
-1. **Write and Delete Operations (`write`, `delete`, `append`)**: Rigidly restricted to the `workspace/` subdirectory for isolation and security. Any provided path is resolved relative to the `workspace/` folder.
-2. **Read and List Operations (`read`, `ls`, `exists`)**: Permitted global read access across the physical repository root (`PROJECT_ROOT`). If the path is `.` or `/`, it resolves to the repository root.
-
----
-
-### Example Tool with `internal: true` — BrowserTool
-
-```json
-{
-  "id": "tool-browser",
-  "type": "tool",
-  "version": "1.0.0",
-  "description": "HTTP fetch and binary download. fetch returns page text; download saves bytes to workspace/.",
-  "lifecycle": { "mode": "on-demand", "idleTimeoutSeconds": 300 },
-
-  "capabilities": [
-    {
-      "name": "tool.browser.fetch",
-      "description": "Fetch text content from a URL (op:fetch) or download binary files to workspace/ (op:download).",
-      "version": "1.0.0",
-      "triggerEvent": "capability.tool.browser.fetch",
-      "replyEvent": "capability.result",
-      "internal": true,
-      "inputSchema": {
-        "required": ["op", "url"],
-        "properties": {
-          "op":       { "type": "string", "enum": ["fetch", "download"] },
-          "url":      { "type": "string" },
-          "dest":     { "type": "string", "description": "Filename in workspace/ for download (optional)" },
-          "maxChars": { "type": "integer", "description": "Max characters for fetch (default 4000)" }
-        }
-      }
-    }
-  ]
-}
-```
-
-**`internal: true`**: The capability only appears in the available list for agents configured with `seeInternalTools: true` in their `plugin.json`. The generic `assistant` cannot see `tool.browser.fetch`; specialized agents such as `researcher` and `writer` can access it.
+**Tool Routing Rule**: `CapabilityInterceptor` receives a `capability.invoke { name: "text.wordcount" }` event, resolves the associated `triggerEvent`, and re-publishes it as `capability.tool.text.wordcount`. The target tool subscribes to this `triggerEvent` directly rather than to the generic `capability.invoke`.
 
 ---
 
@@ -182,76 +90,82 @@ Agents contain `llm`, `agent`, and `capabilities` blocks. The lifecycle mode can
 
 ```json
 {
-  "id": "researcher",
+  "id": "assistant",
   "type": "agent",
   "version": "1.0.0",
-  "description": "Deep research and synthesis specialist.",
+  "description": "Persistent conversational assistant. Handles chat, delegates to specialists.",
 
   "lifecycle": {
-    "mode": "on-demand",
-    "idleTimeoutSeconds": 600
+    "mode": "persistent"
   },
 
   "llm": {
-    "model": "meta/llama-3.3-70b-instruct",
-    "baseUrl": "https://integrate.api.nvidia.com/v1",
-    "apiKeyEnv": "NVIDIA_API_KEY",
-    "maxTokens": 4096,
-    "temperature": 0.2
+    "model": "google/gemini-3.5-flash",
+    "baseUrl": "https://openrouter.ai/api/v1",
+    "apiKeyEnv": "OPENROUTER_API_KEY",
+    "maxTokens": 8192,
+    "temperature": 0.3
   },
 
   "agent": {
-    "skillsDir": "skills/researcher",
-    "maxRounds": 6,
-    "maxDelegations": 2,
-    "maxToolCalls": 20,
-    "maxConcurrentMissions": 1,
-    "seeInternalTools": true,
-    "toolTags": ["research", "search", "filesystem"]
+    "maxRounds": 7,
+    "maxDelegations": 3,
+    "maxToolCalls": 10,
+    "maxConcurrentMissions": 5,
+    "negotiatingTimeoutSeconds": 120
+  },
+
+  "thinking": {
+    "background": "⏳ Still working on it. I'll notify you here when ready! 🔔"
   },
 
   "capabilities": [
     {
-      "name": "agent.research",
-      "description": "Research a topic and return synthesis with sources.",
+      "name": "chat.respond",
+      "description": "Respond to a user chat message.",
       "version": "1.0.0",
-      "triggerEvent": "capability.invoke",
-      "replyEvent": "capability.result",
+      "replyEvent": "chat.response",
       "inputSchema": {
-        "required": ["query"],
-        "optional": ["depth", "sessionId"],
+        "required": ["message"],
         "properties": {
-          "query": { "type": "string" },
-          "depth": { "type": "string", "enum": ["shallow", "deep"] },
-          "sessionId": { "type": "string" }
+          "message": { "type": "string" }
         }
       },
       "outputSchema": {
         "properties": {
-          "summary":    { "type": "string" },
-          "sources":    { "type": "array", "items": { "type": "string" } },
-          "confidence": { "type": "number" }
+          "response": { "type": "string" }
         }
       },
       "exclusive": false,
-      "bidWeight": 0.9
+      "bidWeight": 1.0,
+      "tags": ["chat", "assistant"],
+      "internal": true
     }
   ],
 
   "subscribes": [
-    "message.researcher",
-    "capability.bid.request",
+    "chat.prompt",
+    "message.assistant",
     "capability.result",
-    "system.error"
+    "system.error",
+    "plugin.installed"
   ],
 
   "publishes": [
-    "capability.result",
-    "capability.bid.response",
+    "chat.response",
+    "chat.typing",
+    "chat.thinking",
+    "capability.register",
     "capability.invoke",
-    "blackboard.write",
-    "agent.log"
-  ]
+    "capability.result"
+  ],
+
+  "launch": {
+    "name": "Assistant",
+    "command": ["jbang", "Agent.java"],
+    "order": 40,
+    "delayAfterMs": 300
+  }
 }
 ```
 
@@ -259,38 +173,17 @@ Agents contain `llm`, `agent`, and `capabilities` blocks. The lifecycle mode can
 
 ## The `"thinking"` Block — Progressive Feedback (Optional, Agents Only)
 
-Appears only in user-facing agents (e.g., `assistant`). Defines the status message loop displayed while the agent processes a request.
+Appears in user-facing agents (e.g., `assistant`). Signals that the agent is working by publishing a `chat.thinking` event. The `ConsolePlugin` listens for this event and displays the message to the user.
 
 ```json
 "thinking": {
-  "cycleDelayMs": 12000,
-  "backgroundThresholdMs": 120000,
-  "steps": [
-    "⏳ Thinking...",
-    "⏳ Analyzing...",
-    "⏳ Gathering data...",
-    "⏳ Processing...",
-    "⏳ Almost there...",
-    "⏳ Refining...",
-    "⏳ Finalizing...",
-    "⏳ One more moment..."
-  ],
   "background": "⏳ Still working on it. I'll notify you here when ready! 🔔"
 }
 ```
 
 | Field | Type | Default | Description |
 |---|---|---|---|
-| `steps` | string[] | `["⏳ Thinking..."]` | Loop messages rotated via `EditMessageText` |
-| `cycleDelayMs` | long | `12000` | Wait interval between message changes (ms) |
-| `backgroundThresholdMs` | long | `120000` | Maximum processing time before entering background execution mode (ms) |
-| `background` | string | `"⏳ Still working..."` | Message dispatched when the threshold limit is reached; stops updates |
-
-**Behavior by Channel:**
-- **Telegram**: Sends `steps[0]` as a message, updates via `EditMessageText` every `cycleDelayMs`. Upon reaching `backgroundThresholdMs`, sends `background` and halts updates. In the final response: if background execution was not triggered and response ≤ 4096 characters, edits the thinking message in-place; otherwise, sends a new message.
-- **Console**: Prints `steps[0]` once upon receiving `chat.thinking`; subsequent steps are ignored.
-
-**Publication Flow**: `AgentCore.handleChatPrompt()` publishes `chat.thinking` (serialized `ThinkingConfig` payload) immediately after `chat.typing` and before acquiring the session execution lock.
+| `background` | string | `"⏳ Still working..."` | Message published via `chat.thinking` to inform the user the agent is processing |
 
 ---
 
@@ -298,17 +191,11 @@ Appears only in user-facing agents (e.g., `assistant`). Defines the status messa
 
 | Field | Type | Default | Description |
 |---|---|---|---|
-| `skillsDir` | string | `"."` | Directory containing persona `.md` and specification sheets |
 | `maxRounds` | integer | `5` | Maximum execution loops the LLM can run during a task |
 | `maxDelegations` | integer | `3` | Maximum routing delegations allowed during a task |
 | `maxToolCalls` | integer | `20` | Maximum tool execution calls allowed during a task |
 | `maxConcurrentMissions` | integer | `1` | Maximum parallel task loops permitted for the agent |
-| `seeInternalTools` | boolean | `false` | `true` allows the agent to discover and invoke tools marked `internal: true` |
-| `toolTags` | string[] | `null` | Tag filters for tool discovery (e.g., `["research"]`). If omitted, all permitted tools are visible |
-| `negotiatingTimeoutSeconds`| integer | `120` | Maximum negotiation seconds allowed (Deprecated) |
-| `contextLoading` | string | `"lazy"` | Ignored by runtime; all discovery is eager (Deprecated) |
-| `requireToolOnRound1` | boolean | `true` | Ignored; the LLM determines tool usage autonomously (Deprecated) |
-| `requireDelegationOnRound1`| boolean | `true` | Ignored; the LLM determines delegation autonomously (Deprecated) |
+| `negotiatingTimeoutSeconds` | integer | `120` | Maximum seconds allowed for capability negotiation |
 
 ---
 
@@ -374,7 +261,7 @@ For agents sharing `Agent.java`:
 | 20 | System | Critical infrastructure (`CapReg`, `Blackboard`, `WorkflowEngine`) + last item delay |
 | 30 | Tools | Pure utility functions (`DateTime`, `FileSystem`, `Search`) + last item delay |
 | 40 | Agents | Interactive LLM agents; staggered delays and shared prebuild files |
-| 50 | Interactive | Standard Console UI or Telegram bot integrations |
+| 50 | Interactive | Standard Console UI and other interactive front-ends |
 
 ---
 

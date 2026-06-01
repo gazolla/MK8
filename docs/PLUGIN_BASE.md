@@ -79,7 +79,40 @@ The flow diagram below details how the `PluginBase` handles connection bootstrap
 
 ---
 
-## 4. Bidding Auto-Response Mechanism
+## 4. PluginBoot — UDS Connection Bootstrap
+
+`PluginBoot` is a package-private companion class defined in `PluginBase.java`. It handles the low-level sequence of opening the UDS socket and performing the two mandatory registration frames before handing control to plugin logic.
+
+### `static void connectAndRun(String socketPath, PluginConfig config, PluginLogic logic)`
+Opens a `SocketChannel` to the given UDS path, then:
+1. Reads the current process PID via `ProcessHandle.current().pid()` and injects it as the `"pid"` field into the raw config JSON node.
+2. Writes a `plugin.register` frame carrying the full `plugin.json` content (including `pid`) so the Kernel can register subscription routes and the `byPluginId` index.
+3. Writes a `plugin.ready` frame with `{id, pid}` so other plugins waiting on `plugin.ready` events know the plugin is live.
+4. Delegates to `logic.run(in, out)` — the event loop provided by `PluginBase.run()`.
+
+`PluginBoot.PluginLogic` is a `@FunctionalInterface` with signature `void run(InputStream in, OutputStream out) throws Exception`.
+
+---
+
+## 5. Trace Context Propagation
+
+`PluginBase.run()` sets two `ThreadLocal` values from `KernelEvent` on every virtual thread before calling the plugin's `EventHandler`:
+
+```java
+KernelEvent.CURRENT_TRACE_ID.set(ev.traceId());   // from incoming frame
+KernelEvent.CURRENT_SPAN_ID.set(ev.spanId());      // from incoming frame
+```
+
+Both are cleared in the `finally` block after the handler returns, preventing context leakage across virtual thread reuse. Downstream publish calls in the same thread automatically pick up these values via `KernelEvent.of()` / `KernelEvent.withCorrelation()`.
+
+The `publish()` method synchronizes on the shared `OutputStream` to ensure concurrent virtual threads cannot interleave partial frames:
+```java
+synchronized (out) { KernelEvent.writeFrame(out, ...); }
+```
+
+---
+
+## 6. Bidding Auto-Response Mechanism
 
 When the Kernel holds a dynamic bidding auction to route an invoke, it publishes a `capability.bid.request`. `PluginBase` intercepts this event automatically, reads the requested capability name, matches it against the capability registry indexed from the local `plugin.json` schema, and replies to the Kernel with the pre-configured `bidWeight` (the bidding score):
 
