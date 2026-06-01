@@ -1,5 +1,6 @@
 ///usr/bin/env jbang "$0" "$@" ; exit $?
 //JAVA 21+
+//SOURCES ../../kernel/BootHelper.java
 
 import java.io.*;
 import java.nio.file.*;
@@ -30,8 +31,8 @@ public class Start {
     private static final List<Process> bg = new ArrayList<>();
 
     public static void main(String[] args) throws Exception {
-        // Locate the project root (dir containing kernel/Kernel.java) by walking up from cwd.
-        Path root = findProjectRoot();
+        // Locate the project root — local clone, local cache, or download from GitHub.
+        Path root = BootHelper.findOrDownloadRoot(args);
 
         Path chatAiDir   = root.resolve("projects/ChatAI");
         File kernelDir   = root.resolve("kernel").toFile();
@@ -79,17 +80,6 @@ public class Start {
     }
 
     // ── Helpers ───────────────────────────────────────────────────────────────
-
-    /** Walks up from user.dir looking for a directory that contains kernel/Kernel.java. */
-    private static Path findProjectRoot() {
-        Path cwd = Path.of(System.getProperty("user.dir")).toAbsolutePath().normalize();
-        for (Path p = cwd; p != null; p = p.getParent()) {
-            if (Files.exists(p.resolve("kernel/Kernel.java")))
-                return p;
-        }
-        throw new IllegalStateException("[BOOT] Cannot locate project root from: " + cwd
-                + " — run jbang from anywhere inside the MK8 project tree.");
-    }
 
     private static void waitForSocket() throws Exception {
         System.out.print("[BOOT] Waiting for Kernel UDS socket...");

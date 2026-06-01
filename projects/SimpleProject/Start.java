@@ -1,5 +1,6 @@
 ///usr/bin/env jbang "$0" "$@" ; exit $?
 //JAVA 21+
+//SOURCES ../../kernel/BootHelper.java
 
 import java.io.*;
 import java.nio.file.*;
@@ -32,7 +33,7 @@ public class Start {
     private static final List<Process> bg = new ArrayList<>();
 
     public static void main(String[] args) throws Exception {
-        Path root    = findProjectRoot();
+        Path root    = BootHelper.findOrDownloadRoot(args);
         Path projDir = root.resolve("projects/SimpleProject");
 
         File kernelDir  = root.resolve("kernel").toFile();
@@ -79,17 +80,6 @@ public class Start {
     }
 
     // ── Helpers ───────────────────────────────────────────────────────────────
-
-    /** Walks up from user.dir looking for a directory that contains kernel/Kernel.java. */
-    private static Path findProjectRoot() {
-        Path cwd = Path.of(System.getProperty("user.dir")).toAbsolutePath().normalize();
-        for (Path p = cwd; p != null; p = p.getParent()) {
-            if (Files.exists(p.resolve("kernel/Kernel.java")))
-                return p;
-        }
-        throw new IllegalStateException("[BOOT] Cannot locate project root from: " + cwd
-                + " — run jbang from anywhere inside the MK8 project tree.");
-    }
 
     private static void setupLogging(File logFile) throws IOException {
         var original  = System.out;
