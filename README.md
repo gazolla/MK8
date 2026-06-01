@@ -53,6 +53,7 @@ jbang projects/SimpleProject/Start.java
 jbang projects/PluginProject/Start.java
 jbang projects/InterceptorsProject/Start.java
 jbang projects/ChatAI/Start.java
+jbang projects/LogStorm/Start.java
 ```
 
 ### Option 2 — Directly from GitHub (no clone required)
@@ -71,12 +72,15 @@ jbang https://raw.githubusercontent.com/gazolla/MK8/main/projects/InterceptorsPr
 
 # ChatAI — interactive LLM terminal chat (requires OPENROUTER_API_KEY)
 jbang https://raw.githubusercontent.com/gazolla/MK8/main/projects/ChatAI/Start.java
+
+# LogStorm — JavaFX load test dashboard (requires JDK with JavaFX)
+jbang https://raw.githubusercontent.com/gazolla/MK8/main/projects/LogStorm/Start.java
 ```
 
 **Force cache refresh** (pull latest changes from GitHub):
 
 ```bash
-jbang https://raw.githubusercontent.com/gazolla/MK8/main/projects/InterceptorsProject/Start.java --update
+jbang https://raw.githubusercontent.com/gazolla/MK8/main/projects/LogStorm/Start.java --update
 ```
 
 ### What happens on first remote run
@@ -125,6 +129,38 @@ jbang https://raw.githubusercontent.com/gazolla/MK8/main/projects/InterceptorsPr
 ✅ All 3 analyses complete! Idempotency & Collapsing successfully validated.
 ```
 
+### LogStorm — JavaFX load test
+
+LogStorm opens a live dashboard window with an animated event bus. It exercises bidding auctions, on-demand lifecycle, idempotency cache, and Single-Flight collapsing simultaneously under configurable load.
+
+```
+🌩 LogStorm — MK8 Load Test                          [▶ Play]  [■ Stop]
+
+  PROCESSED          RATE             AUCTION WINS
+  8,429              142 / sec        processor-fast    6,023  (71%)
+                                      processor-thorough 2,406  (29%)
+
+  [log-emitter]      [proc-thorough]    [proc-fast]
+       ○                  ○                  ○
+       │     ●→→→→        ↑|               |↑
+  ══════════════════ EVENT BUS ══════════════════════
+       │                  |               |↓
+       ○                  ○                  ○
+  [idempotency]      [capability]      [dashboard]
+
+  SEVERITY                         RECENT EVENTS
+  DEBUG  ████████░░  40%           [INFO]  svc-auth  user 234 authenticated
+  INFO   ██████░░░░  30%           [ERROR] svc-db    connection refused
+  WARN   ████░░░░░░  18%           [WARN]  svc-api   slow response 445ms
+  ERROR  ███░░░░░░░  10%           [FATAL] svc-queue out of memory
+  FATAL  █░░░░░░░░░   4%
+
+  RATE OVERRIDE ─────────────────────────────────────────────
+  [10 ────────────────●──────────── 300]   142  logs/sec
+```
+
+**Requires a JDK with JavaFX** (Liberica, Zulu with FX, GraalVM, or any JDK 21+ with JavaFX modules on the module path).
+
 ---
 
 ## Project Structure
@@ -163,10 +199,19 @@ MK8/
 │   │   ├── summary-agent/              # Persistent agent — orchestrates tool calls
 │   │   └── word-count/                 # On-demand tool — spawned on first invocation
 │   │
-│   └── ChatAI/                          # Interactive LLM terminal chat
+│   ├── ChatAI/                          # Interactive LLM terminal chat
+│   │   ├── Start.java
+│   │   ├── agent/                       # Persistent LLM agent (reads config from plugin.json)
+│   │   └── console/                     # System plugin — stdin → chat.prompt → display
+│   │
+│   └── LogStorm/                        # JavaFX load test — auctions, idempotency, on-demand lifecycle
 │       ├── Start.java
-│       ├── agent/                       # Persistent LLM agent (reads config from plugin.json)
-│       └── console/                     # System plugin — stdin → chat.prompt → display
+│       ├── log-emitter/                 # Generates synthetic logs in waves; Play/Stop via events
+│       ├── processor/
+│       │   └── ProcessorTool.java       # Shared tool code (used by both processor instances)
+│       ├── processor-fast/              # on-demand, bidWeight: 1.5, ~5ms — wins most auctions
+│       ├── processor-thorough/          # on-demand, bidWeight: 0.8, ~20ms — wins under load
+│       └── dashboard/                   # JavaFX plugin: live metrics, animated event bus, rate slider
 │
 └── docs/                                # Documentation
     ├── CONCEPTS.md                      # Core design patterns and system concepts

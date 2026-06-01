@@ -1,0 +1,21 @@
+{
+  "id": "log-emitter",
+  "type": "system",
+  "version": "1.0.0",
+  "description": "Generates synthetic log events at variable wave rates. Starts paused.",
+  "lifecycle": {
+    "mode": "persistent"
+  },
+  "launch": {
+    "name": "LogEmitter",
+    "command": ["jbang", "LogEmitter.java"],
+    "order": 30
+  },
+  "subscribes": [
+    "storm.control",
+    "capability.result"
+  ],
+  "publishes": [
+    "capability.invoke"
+  ]
+}

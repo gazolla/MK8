@@ -1,0 +1,22 @@
+{
+  "id": "dashboard",
+  "type": "system",
+  "version": "1.0.0",
+  "description": "JavaFX live dashboard. Displays real-time metrics and controls Play/Stop.",
+  "lifecycle": {
+    "mode": "persistent"
+  },
+  "launch": {
+    "name": "Dashboard",
+    "command": ["jbang", "Dashboard.java"],
+    "order": 50,
+    "interactive": true
+  },
+  "subscribes": [
+    "storm.metric",
+    "plugin.ready"
+  ],
+  "publishes": [
+    "storm.control"
+  ]
+}
