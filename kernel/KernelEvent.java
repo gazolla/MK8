@@ -183,6 +183,7 @@ public record KernelEvent(
  * / subscribes(), or via plugin.json for plugins.
  */
 interface Events {
-    String PLUGIN_REGISTER = "plugin.register"; // identifies registration frames
-    String MESSAGE_PREFIX  = "message.";        // prefix for direct-message routing
+    String PLUGIN_REGISTER     = "plugin.register";             // identifies registration frames
+    String MESSAGE_PREFIX      = "message.";                    // prefix for direct-message routing
+    String PLUGIN_DISCONNECTED = "system.plugin.disconnected";  // announced by the kernel when a connection drops
 }

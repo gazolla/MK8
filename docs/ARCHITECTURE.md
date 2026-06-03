@@ -78,6 +78,7 @@ The UDS server and connection manager. Accepts plugin connections, runs the inte
 - `start(interceptors)` — binds the UDS socket and enters the accept loop.
 - `handleClient(channel)` — one virtual thread per plugin; reads frames and calls `route()`.
 - `register(event, channel)` — creates a `Connection`, registers routes from the `plugin.register` payload.
+- `unregister(connection)` — removes all routes for a dropped connection and announces `system.plugin.disconnected` through the normal routing path (naming no listener), letting any interceptor react to the loss.
 - `route(event, json, source)` — runs the interceptor chain, then broadcasts if not consumed.
 - `findProjectRoot()` — walks up from `user.dir` looking for `kernel/Kernel.java` to locate the project root.
 
@@ -139,7 +140,7 @@ interface InterceptorLifecycle {
 
 ## Layer 2 — The Interceptors
 
-Three interceptors execute sequentially for every incoming event. Each has a single responsibility:
+Four interceptors execute sequentially for every incoming event. Each has a single responsibility:
 
 ```
 Incoming event
@@ -165,17 +166,34 @@ Incoming event
       │
       ▼
 ┌──────────────────────────────────────────────────────────────────────┐
-│ PluginManager                                                        │
+│ PluginInterceptor                                                    │
 │ "Is this a lifecycle event?"                                         │
-│   system.plugin.spawn     → spawn process and STOP     (true)       │
-│   system.plugin.usage     → update timestamp CONTINUE  (false)      │
-│   system.plugin.list.req  → reply with list and STOP   (true)       │
-│   system.catalog.refresh  → re-scan disk and CONTINUE  (false)      │
+│ system.plugin.spawn         → spawn process and STOP    (true)       │
+│ system.plugin.usage         → update timestamp CONTINUE  (false)     │
+│ system.plugin.list.req      → reply with list and STOP   (true)      │
+│ system.catalog.refresh      → re-scan disk and CONTINUE  (false)     │
+│ plugin.ready                → bind pid for supervision   (false)     │
+│ system.plugin.disconnected  → auto-restart if crashed    (false)     │
+│ system.plugin.restart.req   → restart + reply and STOP   (true)      │
+└──────────────────────────────────────────────────────────────────────┘
+      │
+      ▼
+┌──────────────────────────────────────────────────────────────────────┐
+│ BlackboardInterceptor                                                │
+│ "Is this a blackboard.* operation?"                                  │
+│ blackboard.read   → reply read.result and STOP    (true)             │
+│ blackboard.write  → store + notify updated.* STOP  (true)            │
+│ blackboard.query  → reply query.result and STOP    (true)            │
+│ blackboard.purge  → purge scope and STOP           (true)            │
 └──────────────────────────────────────────────────────────────────────┘
       │
       ▼
 Broadcast to all subscribers
 ```
+
+Their event types are disjoint, so the relative order in the chain does not
+matter — each interceptor's `handles()` filters to its own events. The blackboard
+sits last only by convention.
 
 ### `IdempotencyInterceptor`
 
@@ -193,7 +211,7 @@ Sits at position 1. Maintains the live capability registry and coordinates routi
 - **`registrations`** — `ConcurrentHashMap<String, CopyOnWriteArrayList<Registration>>`: maps capability names to live provider registrations. A `Registration` holds `pluginId`, `triggerEvent` (null for agents), and `bidWeight`.
 - **`builtins`** — `Map<String, BuiltInHandler>`: built-in capability handlers resolved before the live registry. Currently contains `"system.capability.list"` → `buildCapabilityList()`.
 - **`pendingInvokes`** — queues `capability.invoke` events while an on-demand plugin is starting up. Drained when the plugin registers.
-- **`localCatalog`** — local copy of the `PluginManager` catalog, populated via `system.catalog.entry` events. Zero direct coupling to `PluginManager`.
+- **`localCatalog`** — local copy of the `PluginInterceptor` catalog, populated via `system.catalog.entry` events. Zero direct coupling to `PluginInterceptor`.
 - **`auctions`** — tracks in-flight bidding auctions. Resolved after a 500ms window or when all candidates have bid.
 - **`catalogReady`** — a `CompletableFuture<Void>` completed on `system.catalog.ready`. Used to wait briefly before declaring a capability unavailable.
 
@@ -206,7 +224,7 @@ Routing decision for `capability.invoke`:
 
 `handleQuery(event)` handles `capability.query` events. The payload is treated as a raw capability name. Returns a `capability.query.result` event with `{"capability": "<name>", "providers": ["id1", ...]}` — the list of currently registered provider plugin IDs.
 
-### `PluginManager`
+### `PluginInterceptor`
 
 Sits at position 2. Single source of truth for plugin discovery and process lifecycle:
 
@@ -216,7 +234,29 @@ Sits at position 2. Single source of truth for plugin discovery and process life
 - **`spawning`** — `ConcurrentHashMap.newKeySet()`: guards against concurrent double-spawn of the same plugin. `spawning.add(pluginId)` is atomic; the entry is always removed in a `finally` block.
 - **Scheduler** — daemon `ScheduledExecutorService` running `checkIdlePlugins()` every 60 seconds.
 
-On `onStart()`, launches the initial catalog scan in a virtual thread. The scan walks the project tree, skips the `kernel/` directory, parses every `plugin.json`, publishes `system.catalog.entry` for each capability, registers `system.plugin.list` as a routable capability, and publishes `system.catalog.ready` on completion.
+On `onStart()`, launches the initial catalog scan in a virtual thread. The scan walks the project tree, skips the `kernel/` directory, parses every `plugin.json`, publishes `system.catalog.entry` for each capability, registers `system.plugin.list` and `system.plugin.restart` as routable capabilities, and publishes `system.catalog.ready` on completion.
+
+**Supervision (folded-in crash recovery).** The PluginInterceptor also owns plugin *resilience*, since it already owns process lifecycle:
+
+- **`launchables`** — recorded during the scan for *every* `plugin.json` with a launch block, independent of capabilities, so even capability-less plugins are revivable.
+- **`supervised`** — per-plugin state (pid learned from `plugin.ready`, restart count, last-restart timestamp, an intentional-stop flag).
+- **Crash detection** — the Kernel emits `system.plugin.disconnected` whenever a connection drops (see Layer 1). The PluginInterceptor reacts: an intentional stop (idle reap / manual restart) is ignored; an unexpected drop of a `persistent` launchable triggers recovery.
+- **Restart policy** — exponential backoff (`1s, 2s, 4s…`), capped at 3 restarts per 60s; exceeding the cap publishes `system.plugin.crashed` and gives up. On-demand plugins are never auto-restarted. A plugin opts out with `"lifecycle": { "restart": "never" }`.
+- **Manual control** — the built-in `system.plugin.restart` capability kills and respawns a named plugin on request; `system.plugin.list` reports each plugin's pid, liveness, and restart count.
+
+The Kernel and the PluginInterceptor stay fully decoupled: the Kernel only *announces* `system.plugin.disconnected` through the normal routing path, naming no listener; the PluginInterceptor subscribes like any other consumer.
+
+### `BlackboardInterceptor`
+
+A shared in-memory key-value store for inter-agent context passing — a "whiteboard" that plugins, which otherwise never talk to each other, use to leave facts for one another (conversation context, research caches, workflow flags). Because it lives inside the kernel, reads and writes resolve in-memory with zero extra network hops: the reply goes straight back to the requester via `bus.sendTo`, correlated by the original `correlationId` (preserved by `KernelEvent.reply`).
+
+- **`store`** — `ConcurrentSkipListMap<String, Entry>` keyed by `"<scope>:<scopeId>:<key>"`. An `Entry` carries `value`, `author`, `tags`, `version`, `ttlSeconds`, and `created/updated` timestamps.
+- **Scopes** — `session` (scopeId = sessionId), `workflow` (scopeId = workflowId), `global` (scopeId = null) bound the reach of each entry.
+- **Optimistic locking** — an optional `expectedVersion` field. The check-and-set + version bump runs inside `store.compute()` so it is atomic under concurrent writers. A mismatch replies `blackboard.write.conflict`; a success (when `expectedVersion >= 0`) replies `blackboard.write.ok`.
+- **TTL** — entries with `ttl > 0` expire after `ttl` seconds; a daemon cleaner sweeps every 60s.
+- **Reactive notifications** — every write publishes `blackboard.updated.{scope}.{key}` via `bus.route()` for any prefix subscriber (e.g. a dashboard).
+
+Events handled (all consumed — `intercept()` returns `true`): `blackboard.read` → `blackboard.read.result`, `blackboard.query` → `blackboard.query.result`, `blackboard.write` (store + notify), `blackboard.purge` (delete a scope). It needs no `pendingRoutes`: the direct `sendTo` reply makes return-routing unnecessary.
 
 ---
 
@@ -310,7 +350,7 @@ Here is the complete path of a `capability.invoke` from `DemoRunner` to `WordCou
    queue in pendingInvokes["text.wordcount"]
    publish system.plugin.spawn { capabilityName: "text.wordcount" }
 
-⑦ PluginManager receives system.plugin.spawn:
+⑦ PluginInterceptor receives system.plugin.spawn:
    spawn WordCountTool via ProcessBuilder
    WordCountTool connects, registers, drains pendingInvokes queue
 
@@ -346,15 +386,19 @@ MK8/
 │       │   └── CapabilityInterceptor.java   ← registry, auctions, routing
 │       ├── idempotency/
 │       │   └── IdempotencyInterceptor.java  ← cache, single-flight collapsing
+│       ├── blackboard/
+│       │   └── BlackboardInterceptor.java   ← shared KV store, scopes, TTL, versioning
 │       └── plugin/
-│           ├── PluginBase.java      ← plugin connection framework
-│           ├── PluginConfig.java    ← plugin.json typed accessor
-│           └── PluginManager.java   ← discovery, catalog, process lifecycle
+│           ├── PluginBase.java          ← plugin connection framework
+│           ├── PluginConfig.java        ← plugin.json typed accessor
+│           └── PluginInterceptor.java   ← discovery, catalog, process lifecycle
 │
 └── projects/                        ← Layer 3
     ├── SimpleProject/               ← raw UDS plugins (no PluginBase)
     ├── PluginProject/               ← PluginBase plugins, simple pub/sub
     ├── InterceptorsProject/         ← tool + agent + transient client demo
+    ├── BlackboardProject/           ← writer/reader demo for the shared blackboard
+    ├── SupervisorProject/           ← crash-detection + auto-restart demo
     └── ChatAI/                      ← LLM agent + interactive console UI
 ```
 
@@ -372,7 +416,8 @@ MK8/
 | `KernelBus` | Give interceptors a safe surface to re-inject events |
 | `IdempotencyInterceptor` | Ensure each request is processed exactly once |
 | `CapabilityInterceptor` | Know who offers each capability and route to them |
-| `PluginManager` | Know what exists on disk and manage process lifecycle |
+| `PluginInterceptor` | Know what exists on disk, manage process lifecycle, and supervise (crash detection + restart) |
+| `BlackboardInterceptor` | Store and serve shared key-value state across plugins |
 | `PluginBase` | Abstract the UDS connection so plugins only write business logic |
 | `PluginBoot` | Handle the low-level UDS boot handshake for plugins |
 | `PluginConfig` | Read `plugin.json` and expose typed configuration |

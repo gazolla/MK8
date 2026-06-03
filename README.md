@@ -20,7 +20,7 @@ Plugin B ──UDS───►  │  │  [IdempotencyInterceptor]         │ �
                     │  │           ↓                       │ │
 Plugin C ──UDS───►  │  │  [CapabilityInterceptor]          │ │  registry / auction
                     │  │           ↓                       │ │
-                    │  │  [PluginManager]                  │ │  spawn / kill
+                    │  │  [PluginInterceptor]              │ │  spawn / kill
                     │  │           ↓                       │ │
                     │  │  [Broadcast / Direct Delivery]    │ │
                     │  └──────────────────────────────────┘ │
@@ -64,7 +64,7 @@ JBang fetches the script and its dependencies from GitHub. On the first run, the
 # SimpleProject — raw UDS producer/consumer
 jbang https://raw.githubusercontent.com/gazolla/MK8/main/projects/SimpleProject/Start.java
 
-# PluginProject — persistent plugins with PluginManager
+# PluginProject — persistent plugins with PluginInterceptor
 jbang https://raw.githubusercontent.com/gazolla/MK8/main/projects/PluginProject/Start.java
 
 # InterceptorsProject — idempotency + collapsing demo
@@ -91,7 +91,7 @@ jbang https://raw.githubusercontent.com/gazolla/MK8/main/projects/LogStorm/Start
 [BOOT] Download complete (1 MB). Extracting...
 [BOOT] Extracted to: /Users/you/.jbang/mk8
 
-[BOOT] Starting Kernel (IdempotencyInterceptor CapabilityInterceptor PluginManager)...
+[BOOT] Starting Kernel (IdempotencyInterceptor CapabilityInterceptor PluginInterceptor)...
 [BOOT] Waiting for Kernel UDS socket..... Connected!
 ...
 ```
@@ -178,9 +178,9 @@ MK8/
 │       ├── idempotency/
 │       │   └── IdempotencyInterceptor.java  # Cache, Single-Flight collapsing
 │       └── plugin/
-│           ├── PluginBase.java          # Plugin connection framework (UDS + event loop)
-│           ├── PluginConfig.java        # Typed plugin.json accessors
-│           └── PluginManager.java       # Plugin discovery, catalog, process lifecycle
+│           ├── PluginBase.java              # Plugin connection framework (UDS + event loop)
+│           ├── PluginConfig.java            # Typed plugin.json accessors
+│           └── PluginInterceptor.java       # Plugin discovery, catalog, process lifecycle
 │
 ├── projects/                            # Runnable examples (Layer 3)
 │   ├── SimpleProject/                   # Raw UDS producer/consumer — no PluginBase
@@ -188,7 +188,7 @@ MK8/
 │   │   ├── Producer.java
 │   │   └── Consumer.java
 │   │
-│   ├── PluginProject/                   # Persistent plugins with PluginManager
+│   ├── PluginProject/                   # Persistent plugins with PluginInterceptor
 │   │   ├── Start.java
 │   │   ├── producer/
 │   │   └── consumer/

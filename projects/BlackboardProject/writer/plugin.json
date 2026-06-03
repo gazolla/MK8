@@ -1,0 +1,20 @@
+{
+  "id": "writer",
+  "type": "system",
+  "version": "1.0.0",
+  "description": "Writes facts to the shared blackboard for the Reader to read back.",
+  "lifecycle": {
+    "mode": "persistent"
+  },
+  "launch": {
+    "name": "Writer",
+    "command": ["jbang", "Writer.java"],
+    "order": 10
+  },
+  "capabilities": [],
+  "subscribes": [
+    "plugin.ready",
+    "blackboard.write.ok",
+    "blackboard.write.conflict"
+  ]
+}

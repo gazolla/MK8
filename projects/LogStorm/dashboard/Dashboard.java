@@ -108,7 +108,7 @@ four key runtime features simultaneously:
     (bidWeight=0.8) wins when fast is under higher load. Effective score =
     bidWeight × (1 − load). The Auction Wins card shows the live split.
 
-  • On-Demand Lifecycle — both processors start dead. PluginManager spawns
+  • On-Demand Lifecycle — both processors start dead. PluginInterceptor spawns
     them via ProcessBuilder on the first invocation and kills them after
     60 seconds of idle time. Watch spawn events in the animation.
 
@@ -131,7 +131,7 @@ PLUGINS
 
   processor-fast       tool  /  on-demand  (bidWeight: 1.5, delay: ~5ms)
     Classifies and enriches log entries quickly. Spawned on the first
-    invocation; killed by PluginManager after 60s of inactivity.
+    invocation; killed by PluginInterceptor after 60s of inactivity.
     Shares ProcessorTool.java with processor-thorough — only plugin.json
     differs (id, bidWeight, processorConfig.delayMs).
 
@@ -184,7 +184,7 @@ INTERCEPTOR CHAIN
     2 providers → starts 500ms auction → routes to effective-score winner.
     Returns true (consumed) — result routed back via pendingRoutes[corrId].
 
-  [PluginManager]  position 2
+  [PluginInterceptor]  position 2
     Handles system.plugin.spawn: ProcessBuilder launch, stdout → log file.
     Handles system.plugin.usage: updates lastUsed timestamp.
     Runs checkIdlePlugins() every 60s — kills processes past idleTimeout.

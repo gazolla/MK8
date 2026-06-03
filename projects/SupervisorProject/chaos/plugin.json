@@ -1,0 +1,22 @@
+{
+  "id": "chaos",
+  "type": "system",
+  "version": "1.0.0",
+  "description": "Crash-and-restart tester: kills heartbeat and verifies supervision, then exits.",
+  "lifecycle": {
+    "mode": "persistent"
+  },
+  "launch": {
+    "name": "Chaos",
+    "command": ["jbang", "Chaos.java"],
+    "order": 20,
+    "interactive": true
+  },
+  "capabilities": [],
+  "subscribes": [
+    "plugin.ready",
+    "system.plugin.spawned",
+    "system.plugin.crashed",
+    "capability.result"
+  ]
+}

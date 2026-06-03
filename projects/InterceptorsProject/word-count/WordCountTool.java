@@ -16,7 +16,7 @@ import java.util.stream.Collectors;
  *
  * Implements the text.wordcount capability as a leaf worker in the MK8 pipeline.
  * It is designed as an on-demand plugin: it is launched automatically by the
- * PluginManager when a request arrives, and is terminated after 60 seconds of idle time.
+ * PluginInterceptor when a request arrives, and is terminated after 60 seconds of idle time.
  * Operates under the trigger event model, subscribing directly to rewritten
  * capability.tool.text.wordcount events published by the CapabilityInterceptor.
  *

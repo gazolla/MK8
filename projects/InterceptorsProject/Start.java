@@ -11,7 +11,7 @@ import java.util.concurrent.TimeUnit;
  * Start — Boot runner for the InterceptorsProject demo.
  *
  * Launches the Kernel with all three interceptors (IdempotencyInterceptor,
- * CapabilityInterceptor, PluginManager), starts SummaryAgent in the background,
+ * CapabilityInterceptor, PluginInterceptor), starts SummaryAgent in the background,
  * then runs DemoRunner in the foreground to validate the full pipeline.
  *
  * Can be invoked from any working directory:
@@ -54,11 +54,11 @@ public class Start {
             System.out.println("          MK8 MicroKernel — Boot Runner                ");
             System.out.println("=======================================================\n");
 
-            System.out.println("[BOOT] Starting Kernel (IdempotencyInterceptor CapabilityInterceptor PluginManager)...");
+            System.out.println("[BOOT] Starting Kernel (IdempotencyInterceptor CapabilityInterceptor PluginInterceptor BlackboardInterceptor)...");
             launchBackground(kernelDir, kernelLog,
                     "jbang", "Kernel.java",
                     "--logs=" + logsDir.getAbsolutePath(),
-                    "IdempotencyInterceptor", "CapabilityInterceptor", "PluginManager");
+                    "IdempotencyInterceptor", "CapabilityInterceptor", "PluginInterceptor", "BlackboardInterceptor");
 
             waitForSocket();
 

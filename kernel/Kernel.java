@@ -3,11 +3,12 @@
 //DEPS com.fasterxml.jackson.core:jackson-databind:2.17.2
 //DEPS com.fasterxml.jackson.datatype:jackson-datatype-jsr310:2.17.2
 //SOURCES KernelEvent.java
-//SOURCES interceptors/plugin/PluginManager.java
+//SOURCES interceptors/plugin/PluginInterceptor.java
 //SOURCES interceptors/plugin/PluginBase.java
 //SOURCES interceptors/plugin/PluginConfig.java
 //SOURCES interceptors/capability/CapabilityInterceptor.java
 //SOURCES interceptors/idempotency/IdempotencyInterceptor.java
+//SOURCES interceptors/blackboard/BlackboardInterceptor.java
 
 import com.fasterxml.jackson.databind.JsonNode;
 import java.io.IOException;
@@ -47,12 +48,12 @@ import java.util.concurrent.*;
  *       e.g. for isolated integration tests.
  *
  *   --logs=<path>
- *       Absolute directory where PluginManager writes on-demand plugin logs.
+ *       Absolute directory where PluginInterceptor writes on-demand plugin logs.
  *       Default: <project-root>/logs (resolved via findProjectRoot heuristic).
  *       Pass the project's own logs/ folder so every log lands together.
  *
  *   --scan=<path>
- *       Root directory PluginManager walks to discover plugin.json files.
+ *       Root directory PluginInterceptor walks to discover plugin.json files.
  *       Default: auto-detected by walking up from cwd until a folder named
  *       "kernel" or a file named "Start.java" is found (findProjectRoot).
  *       Supply an explicit path to eliminate the heuristic entirely.
@@ -69,7 +70,7 @@ import java.util.concurrent.*;
  *       Built-in interceptors:
  *         IdempotencyInterceptor  — single-flight collapsing + sliding-window cache.
  *         CapabilityInterceptor   — capability registry and bid-based routing.
- *         PluginManager           — catalog scan and on-demand process lifecycle.
+ *         PluginInterceptor           — catalog scan and on-demand process lifecycle.
  *       Default (no names given): none — Kernel starts as a pure event bus.
  *
  * ── Examples ──────────────────────────────────────────────────────────────────
@@ -80,7 +81,7 @@ import java.util.concurrent.*;
  *     --logs=/projects/myapp/logs  \
  *     --scan=/projects/myapp       \
  *     --log-level=DEBUG            \
- *     IdempotencyInterceptor CapabilityInterceptor PluginManager
+ *     IdempotencyInterceptor CapabilityInterceptor PluginInterceptor
  *
  *   # Pure event bus (no args needed)
  *   jbang Kernel.java --socket=/tmp/mk8/test.sock
@@ -272,6 +273,20 @@ public class Kernel {
         pendingRoutes.entrySet().removeIf(e -> e.getValue().equals(conn.pluginId));
         conn.shutdown(); // signal writer thread to exit gracefully
         log(LogLevel.INFO, "[KERNEL] Unregistered: " + conn.pluginId);
+        emitDisconnected(conn.pluginId);
+    }
+
+    /**
+     * Announce a dropped connection as a plain broadcast event. The kernel names no
+     * listener — any interceptor or plugin may react (e.g. lifecycle supervision).
+     * This keeps the kernel fully decoupled from whatever consumes the signal.
+     */
+    private void emitDisconnected(String pluginId) {
+        try {
+            KernelEvent ev = KernelEvent.of(Events.PLUGIN_DISCONNECTED,
+                    KernelEvent.MAPPER.writeValueAsString(Map.of("id", pluginId)), "kernel");
+            route(ev, KernelEvent.MAPPER.writeValueAsString(ev), KERNEL_SOURCE);
+        } catch (Exception ignored) {}
     }
 
     // ── Routing ───────────────────────────────────────────────────────────────

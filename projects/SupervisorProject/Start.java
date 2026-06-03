@@ -8,41 +8,44 @@ import java.util.*;
 import java.util.concurrent.TimeUnit;
 
 /**
- * Start — Boot runner for the PluginProject producer/consumer demo.
+ * Start — Boot runner for the SupervisorProject crash/restart demo.
  *
- * Launches the Kernel with only the PluginInterceptor interceptor, starts Consumer
- * in the background, then runs Producer in the foreground. After the Producer
- * finishes, prints the Consumer log so both outputs are visible together.
+ * Launches the Kernel with IdempotencyInterceptor, CapabilityInterceptor and
+ * PluginInterceptor (which now owns crash detection + auto-restart), starts the idle
+ * Heartbeat in the background, then runs Chaos in the foreground. Chaos kills the
+ * Heartbeat to simulate a crash and verifies the PluginInterceptor revives it, then
+ * exercises the manual system.plugin.restart capability. After Chaos exits, the
+ * Heartbeat log is printed so the restarts are visible.
  *
  * Can be invoked from any working directory:
- *   jbang projects/PluginProject/Start.java   (from project root)
- *   jbang Start.java                          (from projects/PluginProject/)
+ *   jbang projects/SupervisorProject/Start.java   (from project root)
+ *   jbang Start.java                              (from projects/SupervisorProject/)
  *
  * Logs:
- *   logs/start.log    — this runner + Producer output (tee'd to terminal)
- *   logs/kernel.log   — kernel stdout/stderr
- *   logs/consumer.log — consumer stdout/stderr
+ *   logs/start.log     — this runner + Chaos output (tee'd to terminal)
+ *   logs/kernel.log    — kernel stdout/stderr
+ *   logs/heartbeat.log — heartbeat stdout/stderr (shows each (re)start)
  */
 public class Start {
 
-    private static final Path   SOCKET_PATH        = Path.of("/tmp/mk8/kernel.sock");
-    private static final long   SOCKET_TIMEOUT_MS  = 5_000;
-    private static final long   CONSUMER_WARMUP_MS = 1_000;
-    private static final long   CONSUMER_DRAIN_MS  = 800;
+    private static final Path SOCKET_PATH       = Path.of("/tmp/mk8/kernel.sock");
+    private static final long SOCKET_TIMEOUT_MS = 5_000;
+    private static final long HEARTBEAT_WARMUP_MS = 1_000;
+    private static final long DRAIN_MS          = 800;
 
     private static final List<Process> bg = new ArrayList<>();
 
     public static void main(String[] args) throws Exception {
         Path root    = BootHelper.findOrDownloadRoot(args);
-        Path projDir = root.resolve("projects/PluginProject");
+        Path projDir = root.resolve("projects/SupervisorProject");
 
-        File kernelDir  = root.resolve("kernel").toFile();
-        File consumerDir= projDir.resolve("consumer").toFile();
-        File producerDir= projDir.resolve("producer").toFile();
-        File logsDir    = projDir.resolve("logs").toFile();
-        File startLog   = new File(logsDir, "start.log");
-        File kernelLog  = new File(logsDir, "kernel.log");
-        File consumerLog= new File(logsDir, "consumer.log");
+        File kernelDir    = root.resolve("kernel").toFile();
+        File heartbeatDir = projDir.resolve("heartbeat").toFile();
+        File chaosDir     = projDir.resolve("chaos").toFile();
+        File logsDir      = projDir.resolve("logs").toFile();
+        File startLog     = new File(logsDir, "start.log");
+        File kernelLog    = new File(logsDir, "kernel.log");
+        File heartbeatLog = new File(logsDir, "heartbeat.log");
 
         Files.createDirectories(logsDir.toPath());
         setupLogging(startLog);
@@ -52,29 +55,29 @@ public class Start {
             Files.deleteIfExists(SOCKET_PATH);
 
             System.out.println("=======================================================");
-            System.out.println("     MK8 PluginProject — Producer / Consumer            ");
-            System.out.println("     Interceptor: PluginInterceptor only                    ");
+            System.out.println("     MK8 SupervisorProject — Crash / Auto-restart       ");
+            System.out.println("     Idempotency + Capability + PluginInterceptor           ");
             System.out.println("=======================================================\n");
 
-            System.out.println("[BOOT] Starting Kernel (PluginInterceptor)...");
+            System.out.println("[BOOT] Starting Kernel (IdempotencyInterceptor CapabilityInterceptor PluginInterceptor)...");
             launchBackground(kernelDir, kernelLog,
                     "jbang", "Kernel.java",
                     "--logs=" + logsDir.getAbsolutePath(),
                     "--scan=" + projDir.toFile().getAbsolutePath(),
-                    "PluginInterceptor");
+                    "IdempotencyInterceptor", "CapabilityInterceptor", "PluginInterceptor");
 
             waitForSocket();
 
-            System.out.println("[BOOT] Starting Consumer in the background...");
-            launchBackground(consumerDir, consumerLog, "jbang", "Consumer.java");
-            Thread.sleep(CONSUMER_WARMUP_MS);
+            System.out.println("[BOOT] Starting Heartbeat in the background...");
+            launchBackground(heartbeatDir, heartbeatLog, "jbang", "Heartbeat.java");
+            Thread.sleep(HEARTBEAT_WARMUP_MS);
 
-            System.out.println("[BOOT] Starting Producer in the foreground...\n");
-            int exit = streamForeground(producerDir, "jbang", "Producer.java");
-            System.out.println("\n[BOOT] Producer finished (exit=" + exit + ").");
+            System.out.println("[BOOT] Starting Chaos in the foreground...\n");
+            int exit = streamForeground(chaosDir, "jbang", "Chaos.java");
+            System.out.println("\n[BOOT] Chaos finished (exit=" + exit + ").");
 
-            Thread.sleep(CONSUMER_DRAIN_MS);
-            printLog(consumerLog);
+            Thread.sleep(DRAIN_MS);
+            printLog(heartbeatLog);
 
         } catch (InterruptedException e) {
             System.out.println("\n[BOOT] Interrupted.");

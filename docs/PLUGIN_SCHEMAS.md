@@ -45,7 +45,7 @@ System plugins contain no `llm`, `agent`, or `capabilities` blocks.
 
 Tool plugins contain no `llm` or `agent` blocks. They declare capabilities in the `capabilities` block.
 
-The lifecycle mode is always `on-demand` accompanied by `idleTimeoutSeconds`. **Tools are not started at boot**. Instead, `PluginManager` spawns them on-demand when `CapabilityInterceptor` broadcasts a `system.plugin.spawn` event on the UDS bus during the first invocation. A tool must subscribe directly to its own capability `triggerEvent`.
+The lifecycle mode is always `on-demand` accompanied by `idleTimeoutSeconds`. **Tools are not started at boot**. Instead, `PluginInterceptor` spawns them on-demand when `CapabilityInterceptor` broadcasts a `system.plugin.spawn` event on the UDS bus during the first invocation. A tool must subscribe directly to its own capability `triggerEvent`.
 
 ```json
 {
@@ -257,7 +257,7 @@ For agents sharing `Agent.java`:
 | order | Tier | Description / Guidelines |
 |---|---|---|
 | 10 | Logger | Active before publishing any event streams |
-| 15 | PluginManager | Runtime orchestration and dynamic spawner controller |
+| 15 | PluginInterceptor | Runtime orchestration and dynamic spawner controller |
 | 20 | System | Critical infrastructure (`CapReg`, `Blackboard`, `WorkflowEngine`) + last item delay |
 | 30 | Tools | Pure utility functions (`DateTime`, `FileSystem`, `Search`) + last item delay |
 | 40 | Agents | Interactive LLM agents; staggered delays and shared prebuild files |

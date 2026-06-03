@@ -1,0 +1,24 @@
+{
+  "id": "reader",
+  "type": "system",
+  "version": "1.0.0",
+  "description": "Reads and queries the shared blackboard across processes, then exits.",
+  "lifecycle": {
+    "mode": "persistent"
+  },
+  "launch": {
+    "name": "Reader",
+    "command": ["jbang", "Reader.java"],
+    "order": 20,
+    "interactive": true
+  },
+  "capabilities": [],
+  "subscribes": [
+    "plugin.ready",
+    "blackboard.read.result",
+    "blackboard.query.result"
+  ],
+  "wildcardSubscribes": [
+    "blackboard.updated.session.*"
+  ]
+}

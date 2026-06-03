@@ -74,7 +74,7 @@ Every plugin must declare these fields:
 }
 ```
 
-`idleTimeoutSeconds` is only meaningful for `on-demand` plugins. The `PluginManager` checks every 60 seconds and terminates processes that have been idle longer than this threshold.
+`idleTimeoutSeconds` is only meaningful for `on-demand` plugins. The `PluginInterceptor` checks every 60 seconds and terminates processes that have been idle longer than this threshold.
 
 ### Declaring Capabilities
 
@@ -156,7 +156,7 @@ Emits a `chat.thinking` event while the agent is processing, so the UI can show 
 
 ### The `launch` Block
 
-Tells `PluginManager` how to start this plugin as a child process:
+Tells `PluginInterceptor` how to start this plugin as a child process:
 
 ```json
 "launch": {

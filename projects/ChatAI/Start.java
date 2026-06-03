@@ -53,7 +53,7 @@ public class Start {
                     "jbang", "Kernel.java",
                     "--logs="  + logsDir.getAbsolutePath(),
                     "--scan="  + chatAiDir.toFile().getAbsolutePath(),
-                    "IdempotencyInterceptor", "CapabilityInterceptor", "PluginManager");
+                    "IdempotencyInterceptor", "CapabilityInterceptor", "PluginInterceptor", "BlackboardInterceptor");
 
             waitForSocket();
 

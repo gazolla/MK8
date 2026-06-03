@@ -8,7 +8,7 @@ import java.util.concurrent.*;
 import java.util.stream.Stream;
 
 /**
- * PluginManager — Plugin discovery, catalog publishing, and process lifecycle management.
+ * PluginInterceptor — Plugin discovery, catalog publishing, and process lifecycle management.
  *
  * Implements EventInterceptor to participate in the Kernel's interceptor chain.
  * At boot, a virtual thread scans the project root for plugin.json files and publishes
@@ -18,7 +18,7 @@ import java.util.stream.Stream;
  * Responds to system.plugin.spawn (on-demand launch), system.plugin.usage (idle tracking),
  * and system.catalog.refresh (hot-reload). Publishes system.plugin.spawned/died/stopped.
  */
-class PluginManager implements EventInterceptor, InterceptorLifecycle {
+class PluginInterceptor implements EventInterceptor, InterceptorLifecycle {
 
     // ── Eventos que publica ───────────────────────────────────────────────────
     private static final String EVT_CATALOG_ENTRY   = "system.catalog.entry";
@@ -33,6 +33,14 @@ class PluginManager implements EventInterceptor, InterceptorLifecycle {
     private static final String EVT_CATALOG_REFRESH = "system.catalog.refresh";
     private static final String EVT_INSTALLED       = "plugin.installed";
     private static final String EVT_LIST_REQUEST    = "system.plugin.list.request";
+    // ── Supervision (folded-in lifecycle: crash detection + auto-restart) ──────
+    private static final String EVT_PLUGIN_READY    = "plugin.ready";
+    private static final String EVT_DISCONNECTED    = "system.plugin.disconnected";
+    private static final String EVT_CRASHED         = "system.plugin.crashed";
+    private static final String EVT_RESTART_REQUEST = "system.plugin.restart.request";
+    private static final String CAP_RESTART         = "system.plugin.restart";
+    private static final long   RESTART_WINDOW_MS   = 60_000L;
+    private static final int    RESTART_MAX         = 3;
     // JSON field keys — payload de catalog.entry
     private static final String F_PLUGIN_ID         = "pluginId";
     private static final String F_PLUGIN_DIR        = "pluginDir";
@@ -49,6 +57,17 @@ class PluginManager implements EventInterceptor, InterceptorLifecycle {
 
     record ManagedProcess(String pluginId, long pid, Path pluginDir, Process process) {}
 
+    /** A plugin.json with a launch command — revivable independent of capabilities. */
+    record Launchable(String pluginId, Path dir, String[] command, boolean persistent, boolean autoRestart) {}
+
+    /** Per-plugin supervision state (pid from plugin.ready, restart accounting). */
+    static final class Supervision {
+        volatile long pid = -1;
+        int           restarts = 0;
+        long          lastRestartMs = 0;
+        volatile boolean stopping = false; // true = intentional stop → suppress auto-restart
+    }
+
     // ── Catalog fields ────────────────────────────────────────────────────────
 
     private final Path mk8Root;
@@ -62,6 +81,11 @@ class PluginManager implements EventInterceptor, InterceptorLifecycle {
     private final Map<String, ManagedProcess> managed  = new ConcurrentHashMap<>();
     private final Map<String, Long>           lastUsed = new ConcurrentHashMap<>();
     private final Set<String>                 spawning = ConcurrentHashMap.newKeySet();
+    // ── Supervision state ──────────────────────────────────────────────────────
+    private final Map<String, Launchable>     launchables = new ConcurrentHashMap<>();
+    private final Map<String, Supervision>    supervised  = new ConcurrentHashMap<>();
+    private final Set<String>                 recovering  = ConcurrentHashMap.newKeySet();
+    private volatile boolean                   shuttingDown = false;
     private final ScheduledExecutorService    scheduler = Executors.newSingleThreadScheduledExecutor(r -> {
         Thread t = new Thread(r, "pluginmgr-timer");
         t.setDaemon(true);
@@ -70,7 +94,7 @@ class PluginManager implements EventInterceptor, InterceptorLifecycle {
 
     // ── Construction ──────────────────────────────────────────────────────────
 
-    PluginManager(KernelBus bus, KernelConfig config) {
+    PluginInterceptor(KernelBus bus, KernelConfig config) {
         this.bus     = bus;
         this.mk8Root = config.scanRoot();
         this.logsDir = (config.logsOverride() != null
@@ -78,6 +102,8 @@ class PluginManager implements EventInterceptor, InterceptorLifecycle {
                 : config.scanRoot().resolve("logs")).toFile();
         this.logsDir.mkdirs();
         scheduler.scheduleAtFixedRate(this::checkIdlePlugins, 60, 60, TimeUnit.SECONDS);
+        // Suppress auto-restart while the kernel is tearing down, so we don't spawn orphans.
+        Runtime.getRuntime().addShutdownHook(new Thread(() -> shuttingDown = true));
     }
 
     @Override
@@ -87,12 +113,13 @@ class PluginManager implements EventInterceptor, InterceptorLifecycle {
 
     @Override public Set<String> publishes() {
         return Set.of(EVT_CATALOG_ENTRY, EVT_CATALOG_READY,
-                      EVT_SPAWNED, EVT_DIED, EVT_STOPPED);
+                      EVT_SPAWNED, EVT_DIED, EVT_STOPPED, EVT_CRASHED);
     }
 
     @Override public Set<String> subscribes() {
         return Set.of(EVT_PLUGIN_SPAWN, EVT_PLUGIN_USAGE,
-                      EVT_CATALOG_REFRESH, EVT_INSTALLED, EVT_LIST_REQUEST);
+                      EVT_CATALOG_REFRESH, EVT_INSTALLED, EVT_LIST_REQUEST,
+                      EVT_PLUGIN_READY, EVT_DISCONNECTED, EVT_RESTART_REQUEST);
     }
 
     // ── EventInterceptor ──────────────────────────────────────────────────────
@@ -103,7 +130,10 @@ class PluginManager implements EventInterceptor, InterceptorLifecycle {
             || type.equals(EVT_PLUGIN_USAGE)
             || type.equals(EVT_CATALOG_REFRESH)
             || type.equals(EVT_INSTALLED)
-            || type.equals(EVT_LIST_REQUEST);
+            || type.equals(EVT_LIST_REQUEST)
+            || type.equals(EVT_PLUGIN_READY)
+            || type.equals(EVT_DISCONNECTED)
+            || type.equals(EVT_RESTART_REQUEST);
     }
 
     @Override
@@ -112,6 +142,9 @@ class PluginManager implements EventInterceptor, InterceptorLifecycle {
             case EVT_PLUGIN_SPAWN    -> { handleSpawn(event);           yield true;  }
             case EVT_PLUGIN_USAGE    -> { handleUsage(event);           yield false; }
             case EVT_LIST_REQUEST    -> { handleListRequest(event);     yield true;  }
+            case EVT_PLUGIN_READY    -> { bindPid(event);              yield false; }
+            case EVT_DISCONNECTED    -> { handleDisconnected(event);    yield false; }
+            case EVT_RESTART_REQUEST -> { handleRestartRequest(event);  yield true;  }
             case EVT_CATALOG_REFRESH,
                  EVT_INSTALLED       -> { System.out.println("[PLUGIN-MGR] Catalog refreshing...");
                                           Thread.ofVirtual().start(this::scan); yield false; }
@@ -124,6 +157,7 @@ class PluginManager implements EventInterceptor, InterceptorLifecycle {
     void scan() {
         byCapName.clear();
         byPluginId.clear();
+        launchables.clear();
 
         int pluginCount = 0;
         int capCount    = 0;
@@ -143,9 +177,6 @@ class PluginManager implements EventInterceptor, InterceptorLifecycle {
                     if (pluginId.isBlank()) continue;
                     if (!"tool".equals(type) && !"agent".equals(type) && !"system".equals(type)) continue;
 
-                    JsonNode caps = json.path("capabilities");
-                    if (!caps.isArray() || caps.isEmpty()) continue;
-
                     String  lifecycleMode = json.path("lifecycle").path("mode").asText("persistent");
                     boolean onDemand      = "on-demand".equals(lifecycleMode);
                     boolean persistent    = "persistent".equals(lifecycleMode);
@@ -159,6 +190,18 @@ class PluginManager implements EventInterceptor, InterceptorLifecycle {
                     }
 
                     String pluginDir = pf.getParent().toAbsolutePath().toString();
+
+                    // Record a launchable for lifecycle supervision — independent of capabilities,
+                    // so capability-less system plugins (pub/sub, UIs) are also revivable.
+                    if (launchCommand != null) {
+                        boolean autoRestart = persistent
+                                && !"never".equals(json.path("lifecycle").path("restart").asText(""));
+                        launchables.put(pluginId, new Launchable(
+                                pluginId, Path.of(pluginDir), launchCommand, persistent, autoRestart));
+                    }
+
+                    JsonNode caps = json.path("capabilities");
+                    if (!caps.isArray() || caps.isEmpty()) continue;
                     pluginCount++;
 
                     for (JsonNode cap : caps) {
@@ -195,6 +238,13 @@ class PluginManager implements EventInterceptor, InterceptorLifecycle {
                     F_BID_WEIGHT,   1.0,
                     F_TRIGGER,      EVT_LIST_REQUEST));
             bus.route(KernelEvent.of("capability.register", reg, SOURCE));
+
+            String regRestart = KernelEvent.MAPPER.writeValueAsString(Map.of(
+                    "name",         CAP_RESTART,
+                    F_PLUGIN_ID,    SOURCE,
+                    F_BID_WEIGHT,   1.0,
+                    F_TRIGGER,      EVT_RESTART_REQUEST));
+            bus.route(KernelEvent.of("capability.register", regRestart, SOURCE));
         } catch (Exception ignored) {}
 
         System.out.println("[PLUGIN-MGR] Scan complete: " + capCount
@@ -220,19 +270,23 @@ class PluginManager implements EventInterceptor, InterceptorLifecycle {
     }
 
     private void handleListRequest(KernelEvent event) throws Exception {
-        List<Map<String, Object>> list = managed.values().stream()
-                .map(mp -> {
-                    Long   last = lastUsed.get(mp.pluginId());
-                    String idle = last != null
-                            ? (System.currentTimeMillis() - last) / 1000 + "s ago"
-                            : "unknown";
-                    return Map.<String, Object>of(
-                            F_PLUGIN_ID, mp.pluginId(),
-                            "pid",       mp.pid(),
-                            "alive",     mp.process().isAlive(),
-                            "lastUsed",  idle);
-                })
-                .toList();
+        Set<String> ids = new TreeSet<>();
+        ids.addAll(managed.keySet());
+        ids.addAll(supervised.keySet());
+
+        List<Map<String, Object>> list = new ArrayList<>();
+        for (String id : ids) {
+            Supervision    s   = supervised.get(id);
+            ManagedProcess mp  = managed.get(id);
+            long           pid = mp != null ? mp.pid() : (s != null ? s.pid : -1);
+            boolean        alive = pid > 0 && ProcessHandle.of(pid).map(ProcessHandle::isAlive).orElse(false);
+            list.add(Map.of(
+                    F_PLUGIN_ID, id,
+                    "pid",       pid,
+                    "alive",     alive,
+                    "restarts",  s != null ? s.restarts : 0,
+                    "managed",   mp != null));
+        }
         String result = KernelEvent.MAPPER.writeValueAsString(
                 Map.of("result", KernelEvent.MAPPER.writeValueAsString(list)));
         bus.route(KernelEvent.withCorrelation("capability.result", result,
@@ -276,13 +330,7 @@ class PluginManager implements EventInterceptor, InterceptorLifecycle {
                 return;
             }
 
-            logsDir.mkdirs();
-            File    logFile = new File(logsDir, pluginId + ".log");
-            Process process = new ProcessBuilder(command)
-                    .directory(pluginDir.toFile())
-                    .redirectOutput(ProcessBuilder.Redirect.appendTo(logFile))
-                    .redirectErrorStream(true)
-                    .start();
+            Process process = startProcess(command, pluginDir, pluginId);
 
             long pid = process.pid();
             managed.put(pluginId, new ManagedProcess(pluginId, pid, pluginDir, process));
@@ -357,6 +405,8 @@ class PluginManager implements EventInterceptor, InterceptorLifecycle {
         ManagedProcess mp = managed.remove(pluginId);
         if (mp == null) return;
         lastUsed.remove(pluginId);
+        Supervision sv = supervised.get(pluginId);
+        if (sv != null) sv.stopping = true; // intentional stop → no auto-restart on the ensuing disconnect
         mp.process().destroy();
         boolean exited = mp.process().waitFor(5, TimeUnit.SECONDS);
         if (!exited) mp.process().destroyForcibly();
@@ -365,5 +415,127 @@ class PluginManager implements EventInterceptor, InterceptorLifecycle {
                 KernelEvent.MAPPER.writeValueAsString(Map.of(
                         F_PLUGIN_ID, pluginId, "pid", mp.pid(), "reason", reason)),
                 SOURCE));
+    }
+
+    // ── Supervision: crash detection + auto-restart ───────────────────────────
+
+    /** plugin.ready carries {id, pid} — learn the OS pid of every plugin (spawned or not). */
+    private void bindPid(KernelEvent event) throws Exception {
+        JsonNode p = KernelEvent.MAPPER.readTree(event.payload());
+        String id  = p.path("id").asText("");
+        long   pid = p.path("pid").asLong(-1);
+        if (id.isBlank() || pid < 0) return;
+        Supervision s = supervised.computeIfAbsent(id, k -> new Supervision());
+        s.pid = pid;
+        s.stopping = false; // a fresh ready means it's up again
+    }
+
+    /** Kernel announced a dropped connection — decide whether it was a crash to revive. */
+    private void handleDisconnected(KernelEvent event) throws Exception {
+        String id = KernelEvent.MAPPER.readTree(event.payload()).path("id").asText("");
+        if (id.isBlank()) return;
+
+        Supervision s = supervised.get(id);
+        if (s != null && s.stopping) { s.stopping = false; return; } // intentional stop
+
+        Launchable l = launchables.get(id);
+        if (l == null || !l.autoRestart()) return; // not supervised / on-demand / opt-out
+
+        if (recovering.add(id)) {
+            Thread.ofVirtual().start(() -> {
+                try { restartWithBackoff(id); }
+                finally { recovering.remove(id); }
+            });
+        }
+    }
+
+    private void restartWithBackoff(String id) {
+        if (shuttingDown) return;
+        Launchable l = launchables.get(id);
+        if (l == null) return;
+
+        Supervision s = supervised.computeIfAbsent(id, k -> new Supervision());
+        long now = System.currentTimeMillis();
+        if (now - s.lastRestartMs < RESTART_WINDOW_MS) {
+            if (s.restarts >= RESTART_MAX) {
+                System.err.println("[PLUGIN-MGR] " + id + " exceeded " + RESTART_MAX
+                        + " restarts in " + (RESTART_WINDOW_MS / 1000) + "s — giving up.");
+                publishCrashed(id, "restart limit reached");
+                return;
+            }
+        } else {
+            s.restarts = 0; // window elapsed → stable → reset
+        }
+
+        s.restarts++;
+        s.lastRestartMs = now;
+        long delayMs = 1000L * (1L << (s.restarts - 1)); // 1s, 2s, 4s...
+        System.out.println("[PLUGIN-MGR] Auto-restart " + id + " (attempt " + s.restarts
+                + "/" + RESTART_MAX + ") in " + (delayMs / 1000.0) + "s");
+        try { Thread.sleep(delayMs); }
+        catch (InterruptedException e) { Thread.currentThread().interrupt(); return; }
+        if (shuttingDown) return;
+        spawnLaunchable(l);
+    }
+
+    private void spawnLaunchable(Launchable l) {
+        try {
+            Process p = startProcess(l.command(), l.dir(), l.pluginId());
+            supervised.computeIfAbsent(l.pluginId(), k -> new Supervision()).pid = p.pid();
+            System.out.println("[PLUGIN-MGR] Re-spawned: " + l.pluginId() + " pid=" + p.pid());
+            publishSpawned(l.pluginId(), p.pid(), "restart");
+        } catch (Exception e) {
+            System.err.println("[PLUGIN-MGR] Re-spawn failed for " + l.pluginId() + ": " + e.getMessage());
+        }
+    }
+
+    /** Built-in capability system.plugin.restart — invoke with payload {id: "<pluginId>"}. */
+    private void handleRestartRequest(KernelEvent event) {
+        Thread.ofVirtual().start(() -> {
+            String result;
+            try {
+                JsonNode p = KernelEvent.MAPPER.readTree(event.payload());
+                String id  = p.path("id").asText(p.path(F_PLUGIN_ID).asText(""));
+                Launchable l = launchables.get(id);
+                if (id.isBlank() || l == null) {
+                    result = "No launchable plugin: " + id;
+                } else {
+                    Supervision s = supervised.computeIfAbsent(id, k -> new Supervision());
+                    s.stopping = true;          // suppress auto-restart from the kill below
+                    if (s.pid > 0) ProcessHandle.of(s.pid).ifPresent(ProcessHandle::destroy);
+                    s.restarts = 0;             // manual restart resets the backoff window
+                    Thread.sleep(500);          // grace for the old socket to drop
+                    spawnLaunchable(l);
+                    result = "Restarted: " + id;
+                }
+            } catch (Exception e) {
+                result = "Restart error: " + e.getMessage();
+            }
+            try {
+                String payload = KernelEvent.MAPPER.writeValueAsString(Map.of("result", result));
+                bus.route(KernelEvent.withCorrelation("capability.result", payload,
+                        SOURCE, event.correlationId(), event.sessionId()));
+            } catch (Exception ignored) {}
+        });
+    }
+
+    private void publishCrashed(String pluginId, String reason) {
+        try {
+            bus.route(KernelEvent.of(EVT_CRASHED,
+                    KernelEvent.MAPPER.writeValueAsString(Map.of(
+                            F_PLUGIN_ID, pluginId, "reason", reason)),
+                    SOURCE));
+        } catch (Exception ignored) {}
+    }
+
+    /** Shared process launcher (DRY) — used by on-demand spawn and supervision restart. */
+    private Process startProcess(String[] command, Path dir, String pluginId) throws Exception {
+        logsDir.mkdirs();
+        File logFile = new File(logsDir, pluginId + ".log");
+        return new ProcessBuilder(command)
+                .directory(dir.toFile())
+                .redirectOutput(ProcessBuilder.Redirect.appendTo(logFile))
+                .redirectErrorStream(true)
+                .start();
     }
 }

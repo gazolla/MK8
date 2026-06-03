@@ -79,5 +79,10 @@ public class Producer {
                 KernelEvent.MAPPER.writeValueAsString(Map.of("total", ITEM_COUNT)),
                 SOURCE_ID), out);
         System.out.println("\n[PRODUCER] → sent data.done. All " + ITEM_COUNT + " items dispatched.");
+
+        // publish() writes synchronously, so the data.done frame is already on the
+        // socket. Exit cleanly — mirrors Consumer's System.exit(0) on data.done —
+        // so the PluginBase event loop stops and Start's foreground wait returns.
+        System.exit(0);
     }
 }

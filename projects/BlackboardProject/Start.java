@@ -8,41 +8,44 @@ import java.util.*;
 import java.util.concurrent.TimeUnit;
 
 /**
- * Start — Boot runner for the PluginProject producer/consumer demo.
+ * Start — Boot runner for the BlackboardProject writer/reader demo.
  *
- * Launches the Kernel with only the PluginInterceptor interceptor, starts Consumer
- * in the background, then runs Producer in the foreground. After the Producer
- * finishes, prints the Consumer log so both outputs are visible together.
+ * Launches the Kernel with the PluginInterceptor and BlackboardInterceptor, starts
+ * the Writer in the background, then runs the Reader in the foreground. The
+ * Writer populates the shared blackboard; the Reader — a separate process —
+ * reads and queries it back, demonstrating the BlackboardInterceptor as genuine
+ * cross-process shared memory. After the Reader finishes, the Writer log is
+ * printed so both outputs are visible together.
  *
  * Can be invoked from any working directory:
- *   jbang projects/PluginProject/Start.java   (from project root)
- *   jbang Start.java                          (from projects/PluginProject/)
+ *   jbang projects/BlackboardProject/Start.java   (from project root)
+ *   jbang Start.java                              (from projects/BlackboardProject/)
  *
  * Logs:
- *   logs/start.log    — this runner + Producer output (tee'd to terminal)
- *   logs/kernel.log   — kernel stdout/stderr
- *   logs/consumer.log — consumer stdout/stderr
+ *   logs/start.log   — this runner + Reader output (tee'd to terminal)
+ *   logs/kernel.log  — kernel stdout/stderr
+ *   logs/writer.log  — writer stdout/stderr
  */
 public class Start {
 
-    private static final Path   SOCKET_PATH        = Path.of("/tmp/mk8/kernel.sock");
-    private static final long   SOCKET_TIMEOUT_MS  = 5_000;
-    private static final long   CONSUMER_WARMUP_MS = 1_000;
-    private static final long   CONSUMER_DRAIN_MS  = 800;
+    private static final Path SOCKET_PATH       = Path.of("/tmp/mk8/kernel.sock");
+    private static final long SOCKET_TIMEOUT_MS = 5_000;
+    private static final long WRITER_WARMUP_MS  = 1_000;
+    private static final long WRITER_DRAIN_MS   = 800;
 
     private static final List<Process> bg = new ArrayList<>();
 
     public static void main(String[] args) throws Exception {
         Path root    = BootHelper.findOrDownloadRoot(args);
-        Path projDir = root.resolve("projects/PluginProject");
+        Path projDir = root.resolve("projects/BlackboardProject");
 
-        File kernelDir  = root.resolve("kernel").toFile();
-        File consumerDir= projDir.resolve("consumer").toFile();
-        File producerDir= projDir.resolve("producer").toFile();
-        File logsDir    = projDir.resolve("logs").toFile();
-        File startLog   = new File(logsDir, "start.log");
-        File kernelLog  = new File(logsDir, "kernel.log");
-        File consumerLog= new File(logsDir, "consumer.log");
+        File kernelDir = root.resolve("kernel").toFile();
+        File writerDir = projDir.resolve("writer").toFile();
+        File readerDir = projDir.resolve("reader").toFile();
+        File logsDir   = projDir.resolve("logs").toFile();
+        File startLog  = new File(logsDir, "start.log");
+        File kernelLog = new File(logsDir, "kernel.log");
+        File writerLog = new File(logsDir, "writer.log");
 
         Files.createDirectories(logsDir.toPath());
         setupLogging(startLog);
@@ -52,29 +55,29 @@ public class Start {
             Files.deleteIfExists(SOCKET_PATH);
 
             System.out.println("=======================================================");
-            System.out.println("     MK8 PluginProject — Producer / Consumer            ");
-            System.out.println("     Interceptor: PluginInterceptor only                    ");
+            System.out.println("     MK8 BlackboardProject — Writer / Reader            ");
+            System.out.println("     Interceptors: PluginInterceptor + BlackboardInterceptor");
             System.out.println("=======================================================\n");
 
-            System.out.println("[BOOT] Starting Kernel (PluginInterceptor)...");
+            System.out.println("[BOOT] Starting Kernel (PluginInterceptor BlackboardInterceptor)...");
             launchBackground(kernelDir, kernelLog,
                     "jbang", "Kernel.java",
                     "--logs=" + logsDir.getAbsolutePath(),
                     "--scan=" + projDir.toFile().getAbsolutePath(),
-                    "PluginInterceptor");
+                    "PluginInterceptor", "BlackboardInterceptor");
 
             waitForSocket();
 
-            System.out.println("[BOOT] Starting Consumer in the background...");
-            launchBackground(consumerDir, consumerLog, "jbang", "Consumer.java");
-            Thread.sleep(CONSUMER_WARMUP_MS);
+            System.out.println("[BOOT] Starting Writer in the background...");
+            launchBackground(writerDir, writerLog, "jbang", "Writer.java");
+            Thread.sleep(WRITER_WARMUP_MS);
 
-            System.out.println("[BOOT] Starting Producer in the foreground...\n");
-            int exit = streamForeground(producerDir, "jbang", "Producer.java");
-            System.out.println("\n[BOOT] Producer finished (exit=" + exit + ").");
+            System.out.println("[BOOT] Starting Reader in the foreground...\n");
+            int exit = streamForeground(readerDir, "jbang", "Reader.java");
+            System.out.println("\n[BOOT] Reader finished (exit=" + exit + ").");
 
-            Thread.sleep(CONSUMER_DRAIN_MS);
-            printLog(consumerLog);
+            Thread.sleep(WRITER_DRAIN_MS);
+            printLog(writerLog);
 
         } catch (InterruptedException e) {
             System.out.println("\n[BOOT] Interrupted.");

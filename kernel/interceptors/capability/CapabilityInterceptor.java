@@ -33,10 +33,10 @@ interface BuiltInHandler {
  * CapabilityInterceptor — Live capability registry, routing broker, and auction engine.
  *
  * Occupies position 1 in the Kernel's interceptor chain (executing after idempotency).
- * Maintains a local catalog populated via system.catalog.entry events from PluginManager —
- * zero direct dependency on PluginManager. Communicates via events only:
+ * Maintains a local catalog populated via system.catalog.entry events from PluginInterceptor —
+ * zero direct dependency on PluginInterceptor. Communicates via events only:
  *   system.catalog.entry/ready → received, builds localCatalog
- *   system.plugin.spawn/usage  → published, PluginManager handles
+ *   system.plugin.spawn/usage  → published, PluginInterceptor handles
  */
 class CapabilityInterceptor implements EventInterceptor {
 
@@ -182,7 +182,7 @@ class CapabilityInterceptor implements EventInterceptor {
         };
     }
 
-    // ── Catalog local — recebe push do PluginManager ──────────────────────────
+    // ── Catalog local — recebe push do PluginInterceptor ──────────────────────────
 
     private void handleCatalogEntry(KernelEvent event) throws Exception {
         JsonNode p       = KernelEvent.MAPPER.readTree(event.payload());

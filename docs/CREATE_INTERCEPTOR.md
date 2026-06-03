@@ -1,6 +1,6 @@
 # Creating a Custom Interceptor
 
-This guide walks you through building a new interceptor for the MK8 MicroKernel. Every interceptor in the system — `IdempotencyInterceptor`, `CapabilityInterceptor`, and `PluginManager` — follows the same set of conventions described here.
+This guide walks you through building a new interceptor for the MK8 MicroKernel. Every interceptor in the system — `IdempotencyInterceptor`, `CapabilityInterceptor`, and `PluginInterceptor` — follows the same set of conventions described here.
 
 ---
 
@@ -15,7 +15,7 @@ An interceptor is a class that plugs into the Kernel's event routing pipeline. B
 Interceptors are loaded at boot from positional CLI arguments — no registration file, no annotation, no configuration:
 
 ```bash
-jbang Kernel.java IdempotencyInterceptor CapabilityInterceptor PluginManager MyInterceptor
+jbang Kernel.java IdempotencyInterceptor CapabilityInterceptor PluginInterceptor MyInterceptor
 ```
 
 Order matters: each interceptor sees the event before the ones listed after it.

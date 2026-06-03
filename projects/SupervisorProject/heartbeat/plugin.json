@@ -1,0 +1,16 @@
+{
+  "id": "heartbeat",
+  "type": "system",
+  "version": "1.0.0",
+  "description": "Idle persistent plugin used to test crash detection and auto-restart.",
+  "lifecycle": {
+    "mode": "persistent"
+  },
+  "launch": {
+    "name": "Heartbeat",
+    "command": ["jbang", "Heartbeat.java"],
+    "order": 10
+  },
+  "capabilities": [],
+  "subscribes": []
+}

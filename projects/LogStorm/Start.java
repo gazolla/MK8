@@ -11,7 +11,7 @@ import java.util.concurrent.TimeUnit;
  * Start — Boot runner for the LogStorm load test project.
  *
  * Spawns Kernel + LogEmitter in the background, then runs the JavaFX Dashboard
- * in the foreground. ProcessorTools are on-demand — PluginManager spawns them
+ * in the foreground. ProcessorTools are on-demand — PluginInterceptor spawns them
  * automatically when the first log arrives after the user hits Play.
  *
  * Can be invoked from any working directory:
@@ -49,7 +49,7 @@ public class Start {
                     "jbang", "Kernel.java",
                     "--logs=" + logsDir.getAbsolutePath(),
                     "--scan=" + projDir.toFile().getAbsolutePath(),
-                    "IdempotencyInterceptor", "CapabilityInterceptor", "PluginManager");
+                    "IdempotencyInterceptor", "CapabilityInterceptor", "PluginInterceptor");
 
             waitForSocket();
 
