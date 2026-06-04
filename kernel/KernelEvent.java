@@ -137,6 +137,17 @@ public record KernelEvent(
         return new KernelEvent(uuid(), type, payload, now(), source, correlationId, sessionId, null, null, t[0], t[1]);
     }
 
+    /**
+     * Session-scoped event. Roots a new trace (traceId = spanId = uuid) when none is
+     * active on the current thread, so first-touch events like chat.* start a trace.
+     */
+    public static KernelEvent withSession(String type, String payload, String source, String sessionId) {
+        String tid = CURRENT_TRACE_ID.get();
+        String sid = CURRENT_SPAN_ID.get();
+        if (tid == null) { tid = uuid(); sid = tid; }
+        return new KernelEvent(uuid(), type, payload, now(), source, null, sessionId, null, null, tid, sid);
+    }
+
     public static KernelEvent reply(KernelEvent origin, String type, String payload, String source) {
         return new KernelEvent(uuid(), type, payload, now(), source,
                 origin.correlationId(), origin.sessionId(), origin.workflowId(),
