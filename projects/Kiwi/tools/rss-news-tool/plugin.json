@@ -1,0 +1,33 @@
+{
+  "id" : "rss-news-tool",
+  "type" : "tool",
+  "version" : "1.0.0",
+  "description" : "Ferramenta de pesquisa de notícias via RSS. Verifica se um site suporta RSS e retorna as notícias encontradas.",
+  "lifecycle" : {
+    "mode" : "on-demand",
+    "idleTimeoutSeconds" : 300
+  },
+  "launch" : {
+    "command" : [ "jbang", "RssNewsTool.java" ],
+    "name" : "rss-news-tool",
+    "order" : 10,
+    "delayAfterMs" : 2000
+  },
+  "capabilities" : [ {
+    "name" : "tool.rss.fetch",
+    "description" : "Busca notícias de um site via RSS. Retorna as notícias se o site suportar RSS, ou informa que o site não suporta.",
+    "triggerEvent" : "capability.tool.rss.fetch",
+    "inputSchema" : {
+      "type" : "object",
+      "properties" : {
+        "url" : {
+          "type" : "string",
+          "description" : "URL do site para buscar notícias via RSS (ex: https://g1.globo.com)"
+        }
+      },
+      "required" : [ "url" ]
+    }
+  } ],
+  "subscribes" : [ "capability.bid.request", "capability.tool.rss.fetch" ],
+  "publishes" : [ "capability.bid.response", "capability.result", "capability.error" ]
+}

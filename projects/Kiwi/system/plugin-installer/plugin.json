@@ -1,0 +1,58 @@
+{
+  "id": "plugin-installer",
+  "type": "system",
+  "version": "1.0.0",
+  "description": "Installs a generated MK7 plugin: validates, writes files to the correct directory (tools/, agent/skills/, system/), compiles, and spawns the process. Access to the full MK7 project tree — not sandboxed to workspace/.",
+  "lifecycle": { "mode": "persistent" },
+
+  "capabilities": [
+    {
+      "name": "tool.plugin.install",
+      "description": "Install a generated plugin from its artifacts. Writes plugin.json, Java source, and persona.md to the correct MK7 directory based on type, pre-compiles, and spawns the process.",
+      "version": "1.0.0",
+      "triggerEvent": "capability.tool.plugin.install",
+      "replyEvent": "capability.result",
+      "internal": true,
+      "inputSchema": {
+        "required": ["type", "name", "pluginJson"],
+        "optional": ["javaCode", "javaFilePath", "personaMd", "overwrite"],
+        "properties": {
+          "type":         { "type": "string", "enum": ["tool", "agent", "system"] },
+          "name":         { "type": "string", "description": "Plugin directory name, e.g. 'weather-tool'" },
+          "pluginJson":   { "type": "string", "description": "Content of plugin.json" },
+          "javaCode":     { "type": "string", "description": "Java source inline (empty for agent type)" },
+          "javaFilePath": { "type": "string", "description": "Filename of Java source already written to workspace/ (preferred over javaCode)" },
+          "personaMd":    { "type": "string", "description": "Content of persona.md (agent type only)" },
+          "overwrite":    { "type": "boolean", "description": "If true, kill the running process, delete the existing directory, and reinstall. Default: false." }
+        }
+      },
+      "outputSchema": {
+        "properties": {
+          "result": { "type": "string", "description": "e.g. 'installed tools/weather-tool/ (2 files, pid=1234)'" }
+        }
+      },
+      "exclusive": false,
+      "bidWeight": 1.0,
+      "tags": ["tool", "install", "plugin"]
+    }
+  ],
+
+  "subscribes": [
+    "capability.tool.plugin.install",
+    "capability.bid.request"
+  ],
+
+  "publishes": [
+    "capability.register",
+    "capability.result",
+    "capability.error",
+    "capability.bid.response"
+  ],
+
+  "launch": {
+    "name":         "PluginInst",
+    "command":      ["jbang", "PluginInstallerTool.java"],
+    "order":        30,
+    "delayAfterMs": 0
+  }
+}

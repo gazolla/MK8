@@ -1,0 +1,152 @@
+{
+  "id": "coder",
+  "type": "agent",
+  "version": "1.0.0",
+  "description": "On-demand code generation agent. Generates and reviews Java plugin code for the MK8 microkernel.",
+  "lifecycle": {
+    "mode": "on-demand",
+    "idleTimeoutSeconds": 600
+  },
+  "llm": {
+    "model": "qwen/qwen3.7-max",
+    "baseUrl": "https://openrouter.ai/api/v1",
+    "apiKeyEnv": "OPENROUTER_API_KEY",
+    "maxTokens": 8192,
+    "temperature": 0.1
+  },
+  "agent": {
+    "skillsDir": ".",
+    "maxRounds": 10,
+    "maxDelegations": 0,
+    "maxToolCalls": 15,
+    "maxConcurrentMissions": 2,
+    "seeInternalTools": true,
+    "toolTags": ["filesystem"]
+  },
+  "capabilities": [
+    {
+      "name": "agent.code.generate",
+      "description": "Generate a complete MK8 plugin: plugin.json + Java source (+ persona.md if agent type). Returns delimited sections: -- plugin.json --, -- java --, optionally -- persona.md --.",
+      "version": "1.0.0",
+      "replyEvent": "capability.result",
+      "inputSchema": {
+        "required": [
+          "spec",
+          "type",
+          "name"
+        ],
+        "optional": [
+          "context"
+        ],
+        "properties": {
+          "spec": {
+            "type": "string",
+            "description": "Natural language description of what the plugin should do"
+          },
+          "type": {
+            "type": "string",
+            "enum": [
+              "tool",
+              "agent",
+              "system"
+            ],
+            "description": "Plugin type"
+          },
+          "name": {
+            "type": "string",
+            "description": "Plugin identifier, e.g. 'weather-tool' or 'translator'"
+          },
+          "context": {
+            "type": "string",
+            "description": "Optional reference code or additional constraints"
+          }
+        }
+      },
+      "outputSchema": {
+        "properties": {
+          "result": {
+            "type": "string",
+            "description": "Delimited sections: -- plugin.json --, -- java --, optionally -- persona.md --"
+          }
+        }
+      },
+      "exclusive": false,
+      "bidWeight": 1.0,
+      "tags": [
+        "agent",
+        "code",
+        "generate"
+      ]
+    },
+    {
+      "name": "agent.code.review",
+      "description": "Review MK8 plugin Java code and plugin.json against the spec and MK8 conventions. Returns approved status, issues list, and optionally a fully corrected Java source.",
+      "version": "1.0.0",
+      "replyEvent": "capability.result",
+      "inputSchema": {
+        "required": [
+          "code",
+          "pluginJson",
+          "spec"
+        ],
+        "properties": {
+          "code": {
+            "type": "string",
+            "description": "Java source code to review"
+          },
+          "pluginJson": {
+            "type": "string",
+            "description": "plugin.json content to review"
+          },
+          "spec": {
+            "type": "string",
+            "description": "Original natural language spec"
+          }
+        }
+      },
+      "outputSchema": {
+        "properties": {
+          "result": {
+            "type": "string",
+            "description": "Delimited: -- review -- section with approved: yes/no, issues, and optionally -- fixedCode --"
+          }
+        }
+      },
+      "exclusive": false,
+      "bidWeight": 1.0,
+      "tags": [
+        "agent",
+        "code",
+        "review"
+      ]
+    }
+  ],
+  "subscribes": [
+    "message.coder",
+    "capability.bid.request",
+    "capability.result",
+    "system.error"
+  ],
+  "wildcardSubscribes": [
+    "blackboard.updated.session.research.*"
+  ],
+  "publishes": [
+    "capability.register",
+    "capability.result",
+    "capability.error",
+    "capability.invoke",
+    "capability.bid.response",
+    "blackboard.read",
+    "blackboard.write"
+  ],
+  "launch": {
+    "name": "Coder",
+    "command": [
+      "jbang",
+      "../../../../agent/Agent.java",
+      "."
+    ],
+    "order": 40,
+    "delayAfterMs": 300
+  }
+}

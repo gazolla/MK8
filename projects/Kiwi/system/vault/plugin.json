@@ -1,0 +1,97 @@
+{
+  "id": "vault",
+  "type": "system",
+  "version": "1.0.0",
+  "description": "Secrets store — holds API keys/passwords for generated tools so secrets never live in plugin.json or reach the LLM.",
+  "lifecycle": { "mode": "persistent" },
+
+  "capabilities": [
+    {
+      "name": "secret.set",
+      "description": "Store a secret value by key. Called out-of-band by the gateway (console/telegram) — never by an agent/LLM.",
+      "version": "1.0.0",
+      "triggerEvent": "capability.system.secret.set",
+      "replyEvent": "capability.result",
+      "inputSchema": {
+        "required": ["key", "value"],
+        "properties": {
+          "key":   { "type": "string", "description": "Secret name, e.g. EMAIL_SMTP_PASSWORD" },
+          "value": { "type": "string", "description": "Secret value (stored encrypted, never logged)" }
+        }
+      },
+      "internal": true,
+      "exclusive": false,
+      "bidWeight": 1.0,
+      "tags": ["secret", "vault"]
+    },
+    {
+      "name": "secret.get",
+      "description": "Fetch a secret value by key. Called by a tool at runtime to read its own configured secret.",
+      "version": "1.0.0",
+      "triggerEvent": "capability.system.secret.get",
+      "replyEvent": "capability.result",
+      "inputSchema": {
+        "required": ["key"],
+        "properties": { "key": { "type": "string", "description": "Secret name to fetch" } }
+      },
+      "internal": true,
+      "exclusive": false,
+      "bidWeight": 1.0,
+      "tags": ["secret", "vault"]
+    },
+    {
+      "name": "secret.has",
+      "description": "Check whether a secret exists by key. Returns 'true' or 'false'.",
+      "version": "1.0.0",
+      "triggerEvent": "capability.system.secret.has",
+      "replyEvent": "capability.result",
+      "inputSchema": {
+        "required": ["key"],
+        "properties": { "key": { "type": "string", "description": "Secret name to check" } }
+      },
+      "internal": true,
+      "exclusive": false,
+      "bidWeight": 1.0,
+      "tags": ["secret", "vault"]
+    },
+    {
+      "name": "secret.request",
+      "description": "Ask the user to provide a missing secret (API key, password, token). Use this whenever a tool reports — usually via an error — that a required secret is not set. Pass the secret 'key' and a human 'prompt' explaining what is needed — NEVER a value. The chat gateway captures the user's next reply directly and stores it encrypted; the secret value never passes through you or the conversation. After it is provided, retry the action that needed it.",
+      "version": "1.0.0",
+      "triggerEvent": "capability.system.secret.request",
+      "replyEvent": "capability.result",
+      "inputSchema": {
+        "required": ["key", "prompt"],
+        "properties": {
+          "key":    { "type": "string", "description": "Secret name the user must provide, e.g. EMAIL_SMTP_PASSWORD" },
+          "prompt": { "type": "string", "description": "Message shown to the user asking for the secret" }
+        }
+      },
+      "internal": false,
+      "exclusive": false,
+      "bidWeight": 1.0,
+      "tags": ["secret", "vault", "elicitation"]
+    }
+  ],
+
+  "subscribes": [
+    "capability.system.secret.set",
+    "capability.system.secret.get",
+    "capability.system.secret.has",
+    "capability.system.secret.request",
+    "capability.bid.request"
+  ],
+  "publishes": [
+    "capability.register",
+    "capability.result",
+    "capability.error",
+    "capability.bid.response",
+    "secret.elicit"
+  ],
+
+  "launch": {
+    "name":  "Vault",
+    "command": ["jbang", "VaultPlugin.java"],
+    "order": 20
+  }
+}

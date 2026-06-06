@@ -1,0 +1,49 @@
+{
+  "id": "tool-datetime",
+  "type": "tool",
+  "version": "1.0.0",
+  "description": "Returns the current date and time in a given timezone.",
+  "lifecycle": { "mode": "on-demand", "idleTimeoutSeconds": 300 },
+
+  "capabilities": [
+    {
+      "name": "tool.datetime.now",
+      "description": "Returns the current ISO-8601 date and time.",
+      "version": "1.0.0",
+      "triggerEvent": "capability.tool.datetime.now",
+      "replyEvent": "capability.result",
+      "inputSchema": {
+        "optional": ["timezone"],
+        "properties": {
+          "timezone": { "type": "string", "description": "IANA timezone name, default UTC" }
+        }
+      },
+      "outputSchema": {
+        "type": "string",
+        "description": "ISO-8601 datetime string"
+      },
+      "exclusive": false,
+      "bidWeight": 1.0,
+      "tags": ["tool", "datetime"]
+    }
+  ],
+
+  "subscribes": [
+    "capability.tool.datetime.now",
+    "capability.bid.request"
+  ],
+
+  "publishes": [
+    "capability.register",
+    "capability.result",
+    "capability.error",
+    "capability.bid.response"
+  ],
+
+  "launch": {
+    "name":         "DateTime",
+    "command":      ["jbang", "DateTimeTool.java"],
+    "order":        30,
+    "delayAfterMs": 0
+  }
+}

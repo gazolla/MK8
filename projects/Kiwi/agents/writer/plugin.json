@@ -1,0 +1,109 @@
+{
+  "id": "writer",
+  "type": "agent",
+  "version": "1.0.0",
+  "description": "On-demand writing agent. Composes structured Markdown articles and reports from research findings.",
+  "lifecycle": {
+    "mode": "on-demand",
+    "idleTimeoutSeconds": 600
+  },
+  "llm": {
+    "model": "qwen/qwen3.7-max",
+    "baseUrl": "https://openrouter.ai/api/v1",
+    "apiKeyEnv": "OPENROUTER_API_KEY",
+    "maxTokens": 8192,
+    "temperature": 0.5
+  },
+  "agent": {
+    "skillsDir": ".",
+    "maxRounds": 15,
+    "maxDelegations": 0,
+    "maxToolCalls": 10,
+    "maxConcurrentMissions": 2,
+    "seeInternalTools": true,
+    "toolTags": ["filesystem"]
+  },
+  "capabilities": [
+    {
+      "name": "agent.write",
+      "description": "Compose a structured Markdown article or report from provided findings and save to workspace.",
+      "version": "1.0.0",
+      "replyEvent": "capability.result",
+      "inputSchema": {
+        "required": [
+          "topic",
+          "findings"
+        ],
+        "optional": [
+          "filename",
+          "language"
+        ],
+        "properties": {
+          "topic": {
+            "type": "string",
+            "description": "Title or subject of the document"
+          },
+          "findings": {
+            "type": "string",
+            "description": "Research content, sources, and notes to structure"
+          },
+          "filename": {
+            "type": "string",
+            "description": "Output filename (without path). Defaults to slugified topic."
+          },
+          "language": {
+            "type": "string",
+            "description": "Language for the article (e.g. 'pt', 'en'). Defaults to language of findings."
+          }
+        }
+      },
+      "outputSchema": {
+        "properties": {
+          "file": {
+            "type": "string",
+            "description": "Workspace-relative path of the saved file"
+          },
+          "summary": {
+            "type": "string",
+            "description": "One-sentence description of what was written"
+          }
+        }
+      },
+      "exclusive": false,
+      "bidWeight": 1.0,
+      "tags": [
+        "agent",
+        "writing",
+        "document"
+      ]
+    }
+  ],
+  "subscribes": [
+    "message.writer",
+    "capability.bid.request",
+    "capability.result",
+    "system.error"
+  ],
+  "wildcardSubscribes": [
+    "blackboard.updated.session.research.*"
+  ],
+  "publishes": [
+    "capability.register",
+    "capability.result",
+    "capability.error",
+    "capability.invoke",
+    "capability.bid.response",
+    "blackboard.read",
+    "blackboard.write"
+  ],
+  "launch": {
+    "name": "Writer",
+    "command": [
+      "jbang",
+      "../../../../agent/Agent.java",
+      "."
+    ],
+    "order": 40,
+    "delayAfterMs": 500
+  }
+}

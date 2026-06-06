@@ -1,0 +1,32 @@
+{
+  "id" : "crypto-quote-tool",
+  "type" : "tool",
+  "version" : "1.0.0",
+  "description" : "Cryptocurrency price quotation tool using DIA API. Returns real-time prices for 3000+ tokens by symbol, name, or currency pair.",
+  "lifecycle" : {
+    "mode" : "on-demand",
+    "idleTimeoutSeconds" : 300
+  },
+  "launch" : {
+    "command" : [ "jbang", "CryptoQuoteTool.java" ],
+    "name" : "CryptoQuoteTool",
+    "order" : 50,
+    "delayAfterMs" : 2000
+  },
+  "capabilities" : [ {
+    "name" : "tool.crypto.quote",
+    "description" : "Get current cryptocurrency price quotation. Accepts currency pairs (BTC/USD), coin names (Solana), or symbols (ETH).",
+    "triggerEvent" : "capability.tool.crypto.quote",
+    "inputSchema" : {
+      "required" : [ "query" ],
+      "properties" : {
+        "query" : {
+          "type" : "string",
+          "description" : "Currency pair (e.g. BTC/USD), coin name (e.g. Solana), or symbol (e.g. ETH)"
+        }
+      }
+    }
+  } ],
+  "subscribes" : [ "capability.tool.crypto.quote", "capability.bid.request" ],
+  "publishes" : [ "capability.result", "capability.error", "capability.bid.response" ]
+}

@@ -1,0 +1,53 @@
+{
+  "id": "tool-filesystem",
+  "type": "tool",
+  "version": "1.0.0",
+  "description": "Sandboxed filesystem operations inside the workspace/ directory.",
+  "lifecycle": { "mode": "on-demand", "idleTimeoutSeconds": 300 },
+
+  "capabilities": [
+    {
+      "name": "tool.filesystem.op",
+      "description": "Sandboxed filesystem operations inside workspace/. op:touch updates a file's modification time so the Telegram interface automatically sends it to the user.",
+      "version": "1.0.0",
+      "triggerEvent": "capability.tool.filesystem.op",
+      "replyEvent": "capability.result",
+      "inputSchema": {
+        "required": ["op", "path"],
+        "optional": ["content", "target"],
+        "properties": {
+          "op":      { "type": "string", "enum": ["read", "write", "append", "ls", "exists", "delete", "touch"] },
+          "path":    { "type": "string" },
+          "content": { "type": "string" },
+          "target":  { "type": "string" }
+        }
+      },
+      "outputSchema": {
+        "type": "string",
+        "description": "Operation result as plain text"
+      },
+      "exclusive": false,
+      "bidWeight": 1.0,
+      "tags": ["tool", "filesystem"]
+    }
+  ],
+
+  "subscribes": [
+    "capability.tool.filesystem.op",
+    "capability.bid.request"
+  ],
+
+  "publishes": [
+    "capability.register",
+    "capability.result",
+    "capability.error",
+    "capability.bid.response"
+  ],
+
+  "launch": {
+    "name":         "FileSys",
+    "command":      ["jbang", "FileSystemTool.java"],
+    "order":        30,
+    "delayAfterMs": 0
+  }
+}

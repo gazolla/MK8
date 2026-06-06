@@ -1,0 +1,77 @@
+{
+  "id": "workflow",
+  "type": "system",
+  "version": "1.0.0",
+  "description": "Executes multi-task DAGs (parallel layers, data binding, failure policies). Merges the MK7 workflow-gateway (submit surface) and workflow-engine (DAG executor) into a single plugin.",
+  "lifecycle": { "mode": "persistent" },
+
+  "capabilities": [
+    {
+      "name": "system.workflow.submit",
+      "description": "Submit a parallel DAG workflow for background execution. The DAG must contain a 'tasks' array; each task has id, capability, optional input (with {{taskId.output.field}} bindings), dependsOn, onFailure and onDependencyFailure. Returns confirmation with the workflowId; the final result is delivered to the chat when the DAG completes.",
+      "version": "1.0.0",
+      "triggerEvent": "capability.system.workflow.submit",
+      "replyEvent": "capability.result",
+      "inputSchema": {
+        "required": ["dag"],
+        "properties": {
+          "dag": {
+            "type": "object",
+            "description": "DAG JSON object with a 'tasks' array defining parallel/sequential steps"
+          }
+        }
+      },
+      "outputSchema": { "properties": { "result": { "type": "string" } } },
+      "exclusive": false,
+      "bidWeight": 1.0,
+      "tags": ["workflow", "orchestration"]
+    },
+    {
+      "name": "system.workflow.status",
+      "description": "Returns the status of a workflow by workflowId (RUNNING, DONE, ERROR, CANCELLED). Omit workflowId to get all tracked workflows.",
+      "version": "1.0.0",
+      "triggerEvent": "capability.system.workflow.status",
+      "replyEvent": "capability.result",
+      "inputSchema": {
+        "properties": {
+          "workflowId": { "type": "string", "description": "Workflow ID to query (omit for all)" }
+        }
+      },
+      "outputSchema": { "properties": { "result": { "type": "string" } } },
+      "exclusive": false,
+      "bidWeight": 1.0,
+      "tags": ["workflow", "awareness"]
+    }
+  ],
+
+  "subscribes": [
+    "capability.system.workflow.submit",
+    "capability.system.workflow.status",
+    "workflow.cancel",
+    "capability.bid.request"
+  ],
+
+  "publishes": [
+    "capability.invoke",
+    "capability.register",
+    "capability.result",
+    "capability.error",
+    "capability.bid.response",
+    "chat.response",
+    "workflow.dag.task.start",
+    "workflow.dag.task.done",
+    "workflow.dag.task.failed",
+    "workflow.dag.result",
+    "workflow.dag.partial",
+    "workflow.dag.error",
+    "blackboard.write",
+    "blackboard.purge"
+  ],
+
+  "launch": {
+    "name":         "Workflow",
+    "command":      ["jbang", "WorkflowEngine.java"],
+    "order":        20,
+    "delayAfterMs": 300
+  }
+}

@@ -1,0 +1,53 @@
+{
+  "id": "tool-search",
+  "type": "tool",
+  "version": "1.0.0",
+  "description": "Performs web searches via the Brave Search API. Requires BRAVE_API_KEY env var.",
+  "lifecycle": { "mode": "on-demand", "idleTimeoutSeconds": 300 },
+
+  "capabilities": [
+    {
+      "name": "tool.search.query",
+      "description": "Searches the web using Brave. type=web (default): title+URL+description. type=images: returns direct image URLs ready to download. type=news: returns recent articles with source and date.",
+      "version": "1.0.0",
+      "triggerEvent": "capability.tool.search.query",
+      "replyEvent": "capability.result",
+      "inputSchema": {
+        "required": ["query"],
+        "optional": ["type", "count"],
+        "properties": {
+          "query": { "type": "string" },
+          "type":  { "type": "string", "enum": ["web", "images", "news"], "default": "web" },
+          "count": { "type": "integer", "default": 5 }
+        }
+      },
+      "outputSchema": {
+        "type": "string",
+        "description": "Numbered list of search results. For images: includes direct image URL per result."
+      },
+      "exclusive": false,
+      "bidWeight": 1.0,
+      "tags": ["tool", "search", "web"],
+      "internal": true
+    }
+  ],
+
+  "subscribes": [
+    "capability.tool.search.query",
+    "capability.bid.request"
+  ],
+
+  "publishes": [
+    "capability.register",
+    "capability.result",
+    "capability.error",
+    "capability.bid.response"
+  ],
+
+  "launch": {
+    "name":         "Search",
+    "command":      ["jbang", "SearchTool.java"],
+    "order":        30,
+    "delayAfterMs": 0
+  }
+}

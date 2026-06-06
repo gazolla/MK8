@@ -1,0 +1,54 @@
+{
+  "id": "telegram",
+  "type": "system",
+  "version": "1.0.0",
+  "description": "Telegram Bot interface — long-polling, routes messages to chat.prompt, delivers responses.",
+  "lifecycle": { "mode": "persistent" },
+
+  "capabilities": [
+    {
+      "name": "system.telegram.send",
+      "description": "Send a Telegram message. Provide 'message' (required) and optionally 'sessionId' to target a specific user session (omit to broadcast to all active chats).",
+      "version": "1.0.0",
+      "triggerEvent": "capability.system.telegram.send",
+      "tags": ["notification", "messaging"],
+      "inputSchema": {
+        "required": ["message"],
+        "properties": {
+          "message":   { "type": "string", "description": "Text to send" },
+          "sessionId": { "type": "string", "description": "Target session (omit to broadcast)" }
+        }
+      },
+      "outputSchema": { "properties": { "result": { "type": "string" } } },
+      "exclusive": false,
+      "bidWeight": 1.0
+    }
+  ],
+
+  "subscribes": [
+    "plugin.ready",
+    "chat.response",
+    "chat.typing",
+    "chat.thinking",
+    "chat.command.result",
+    "secret.elicit",
+    "capability.bid.request",
+    "capability.system.telegram.send"
+  ],
+  "publishes": [
+    "chat.prompt",
+    "chat.command.request",
+    "capability.invoke",
+    "capability.register",
+    "capability.result",
+    "capability.error",
+    "capability.bid.response"
+  ],
+
+  "launch": {
+    "name":        "Telegram",
+    "command":     ["jbang", "TelegramPlugin.java"],
+    "order":       45,
+    "interactive": false
+  }
+}

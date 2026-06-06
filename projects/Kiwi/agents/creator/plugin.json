@@ -1,0 +1,79 @@
+{
+  "id": "creator",
+  "type": "agent",
+  "version": "1.0.0",
+  "description": "On-demand plugin creation agent. Orchestrates the full pipeline: code generation → code review → installation → spawn. Creates new MK8 plugins (tool, agent, or system) from a natural language spec.",
+
+  "lifecycle": {
+    "mode": "on-demand",
+    "idleTimeoutSeconds": 600
+  },
+
+  "llm": {
+    "model": "google/gemini-3.5-flash",
+    "baseUrl": "https://openrouter.ai/api/v1",
+    "apiKeyEnv": "OPENROUTER_API_KEY",
+    "maxTokens": 8192,
+    "temperature": 0.2
+  },
+
+  "agent": {
+    "skillsDir": ".",
+    "maxRounds": 20,
+    "maxDelegations": 5,
+    "maxToolCalls": 20,
+    "maxConcurrentMissions": 1,
+    "seeInternalTools": true,
+    "toolTags": ["filesystem", "install", "code", "awareness", "lifecycle", "diagnostic"]
+  },
+
+  "capabilities": [
+    {
+      "name": "agent.create",
+      "description": "Create a new MK8 plugin from a natural language spec. Generates code, reviews it, installs it in the correct directory, and spawns it. Returns confirmation with the plugin name and registered capabilities.",
+      "version": "1.0.0",
+      "replyEvent": "capability.result",
+      "inputSchema": {
+        "required": ["spec"],
+        "optional": ["type", "name", "overwrite"],
+        "properties": {
+          "spec":      { "type": "string", "description": "Natural language description of what the plugin should do" },
+          "type":      { "type": "string", "enum": ["tool", "agent", "system"], "description": "Plugin type (inferred from spec if omitted)" },
+          "name":      { "type": "string", "description": "Plugin name, e.g. 'weather-tool' (inferred from spec if omitted)" },
+          "overwrite": { "type": "boolean", "description": "If true, kill the existing process and reinstall. Use for auto-healing after runtime errors." }
+        }
+      },
+      "outputSchema": {
+        "properties": {
+          "result": { "type": "string", "description": "Confirmation: plugin name, install path, and capabilities registered" }
+        }
+      },
+      "exclusive": false,
+      "bidWeight": 1.0,
+      "tags": ["agent", "create", "plugin"]
+    }
+  ],
+
+  "subscribes": [
+    "message.creator",
+    "capability.bid.request",
+    "capability.result",
+    "system.error"
+  ],
+
+  "publishes": [
+    "capability.register",
+    "capability.result",
+    "capability.error",
+    "capability.invoke",
+    "capability.bid.response",
+    "agent.spawn"
+  ],
+
+  "launch": {
+    "name":         "Creator",
+    "command":      ["jbang", "../../../../agent/Agent.java", "."],
+    "order":        40,
+    "delayAfterMs": 300
+  }
+}

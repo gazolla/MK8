@@ -1,0 +1,54 @@
+{
+  "id": "tool-browser",
+  "type": "tool",
+  "version": "1.0.0",
+  "description": "HTTP fetch and binary download. fetch returns page text; download saves bytes to workspace/.",
+  "lifecycle": { "mode": "on-demand", "idleTimeoutSeconds": 300 },
+
+  "capabilities": [
+    {
+      "name": "tool.browser.fetch",
+      "description": "HTTP retrieval tool. op:read — fetches URL via Jina AI (renders JavaScript, returns clean Markdown — use for modern sites and image galleries). op:fetch — raw HTTP GET, returns HTML/JSON (fast, no JS). op:download — saves binary file to workspace/ (use for direct image/PDF/ZIP URLs).",
+      "version": "1.0.0",
+      "triggerEvent": "capability.tool.browser.fetch",
+      "replyEvent": "capability.result",
+      "internal": true,
+      "inputSchema": {
+        "required": ["op", "url"],
+        "properties": {
+          "op":       { "type": "string", "enum": ["read", "fetch", "download"], "description": "read=JS-rendered Markdown via Jina; fetch=raw HTML; download=save binary to workspace/" },
+          "url":      { "type": "string", "description": "URL to fetch or download" },
+          "dest":     { "type": "string", "description": "Filename in workspace/ for download op (optional — inferred from URL if omitted)" },
+          "maxChars": { "type": "integer", "description": "Max chars to return for read/fetch op (default 8000)" }
+        }
+      },
+      "outputSchema": {
+        "properties": {
+          "result": { "type": "string" }
+        }
+      },
+      "exclusive": false,
+      "bidWeight": 1.0,
+      "tags": ["tool", "browser", "http"]
+    }
+  ],
+
+  "subscribes": [
+    "capability.tool.browser.fetch",
+    "capability.bid.request"
+  ],
+
+  "publishes": [
+    "capability.register",
+    "capability.result",
+    "capability.error",
+    "capability.bid.response"
+  ],
+
+  "launch": {
+    "name":         "Browser",
+    "command":      ["jbang", "BrowserTool.java"],
+    "order":        30,
+    "delayAfterMs": 0
+  }
+}

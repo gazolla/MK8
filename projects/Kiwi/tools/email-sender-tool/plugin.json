@@ -1,0 +1,53 @@
+{
+  "id" : "email-sender-tool",
+  "type" : "tool",
+  "version" : "1.0.0",
+  "description" : "Ferramenta de envio de emails via SMTP do Gmail com suporte a anexos",
+  "lifecycle" : {
+    "mode" : "on-demand",
+    "idleTimeoutSeconds" : 300
+  },
+  "capabilities" : [ {
+    "name" : "tool.email.send",
+    "description" : "Envia um email com anexo opcional",
+    "triggerEvent" : "capability.tool.email.send",
+    "inputSchema" : {
+      "type" : "object",
+      "required" : [ "emaildestino", "titulo", "msg" ],
+      "properties" : {
+        "emaildestino" : {
+          "type" : "string",
+          "description" : "Email do destinatário"
+        },
+        "titulo" : {
+          "type" : "string",
+          "description" : "Assunto do email"
+        },
+        "msg" : {
+          "type" : "string",
+          "description" : "Corpo da mensagem"
+        },
+        "anexo" : {
+          "type" : "string",
+          "description" : "Caminho opcional para arquivo anexo no workspace"
+        }
+      }
+    }
+  } ],
+  "subscribes" : [ "capability.tool.email.send" ],
+  "publishes" : [ "capability.result", "capability.error" ],
+  "config" : {
+    "mail.smtp.host" : "smtp.gmail.com",
+    "mail.smtp.port" : "587",
+    "mail.smtp.username" : "gazolla.tech@gmail.com"
+  },
+  "secrets" : [ {
+    "key" : "EMAIL_SMTP_PASSWORD",
+    "prompt" : "Senha de app SMTP para gazolla.tech@gmail.com"
+  } ],
+  "launch" : {
+    "name" : "EmailSenderTool",
+    "command" : [ "jbang", "EmailSenderTool.java" ],
+    "order" : 30
+  }
+}

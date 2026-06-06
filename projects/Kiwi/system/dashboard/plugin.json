@@ -1,0 +1,28 @@
+{
+  "id": "dashboard",
+  "type": "system",
+  "version": "1.0.0",
+  "description": "Real-time MK7 monitoring dashboard — HTTP + SSE on port 8080.",
+  "lifecycle": { "mode": "persistent" },
+
+  "subscribes": [
+    "chat.prompt", "chat.response",
+    "capability.register", "capability.invoke", "capability.result", "capability.error",
+    "capability.bid.request", "capability.bid.response",
+    "agent.spawn", "agent.ready", "agent.busy", "agent.idle",
+    "workflow.dag", "workflow.dag.result", "workflow.dag.error",
+    "workflow.dag.task.start", "workflow.dag.task.done", "workflow.dag.task.failed",
+    "blackboard.write", "blackboard.query.result", "blackboard.read.result",
+    "plugin.register", "plugin.load", "plugin.ready",
+    "kernel.error", "health.response"
+  ],
+  "wildcardSubscribes": ["blackboard.updated.*", "log.*"],
+  "publishes": ["blackboard.query"],
+
+  "launch": {
+    "name": "Dashboard",
+    "command": ["jbang", "DashboardPlugin.java"],
+    "order": 30,
+    "delayAfterMs": 500
+  }
+}

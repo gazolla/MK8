@@ -1,0 +1,5 @@
+# Kiwi agent workspace
+
+Sandbox directory for agent file output (writer saves articles here, the filesystem
+tool is sandboxed to it, and Telegram auto-sends files created during a request).
+Kept in git via .gitkeep; contents are runtime artifacts.

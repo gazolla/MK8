@@ -1,0 +1,26 @@
+{
+  "id": "console",
+  "type": "system",
+  "version": "1.0.0",
+  "description": "Terminal UI — reads user input, routes slash commands, displays responses.",
+  "lifecycle": { "mode": "persistent" },
+  "subscribes": [
+    "chat.response",
+    "chat.typing",
+    "chat.thinking",
+    "chat.command.result",
+    "secret.elicit",
+    "plugin.ready"
+  ],
+  "publishes": [
+    "chat.prompt",
+    "chat.command.request",
+    "capability.invoke"
+  ],
+  "launch": {
+    "name":        "Console",
+    "command":     ["jbang", "ConsolePlugin.java"],
+    "order":       50,
+    "interactive": true
+  }
+}

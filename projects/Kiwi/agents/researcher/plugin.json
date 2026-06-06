@@ -1,0 +1,85 @@
+{
+  "id": "researcher",
+  "type": "agent",
+  "version": "1.0.0",
+  "description": "On-demand research agent. Investigates topics and returns structured findings.",
+
+  "lifecycle": {
+    "mode": "on-demand",
+    "idleTimeoutSeconds": 600
+  },
+
+  "llm": {
+    "model": "qwen/qwen3.7-max",
+    "baseUrl": "https://openrouter.ai/api/v1",
+    "apiKeyEnv": "OPENROUTER_API_KEY",
+    "maxTokens": 4096,
+    "temperature": 0.2
+  },
+
+  "agent": {
+    "skillsDir": ".",
+    "maxRounds": 14,
+    "maxDelegations": 0,
+    "maxToolCalls": 10,
+    "maxConcurrentMissions": 3,
+    "seeInternalTools": true,
+    "toolTags": ["search", "browser", "wikipedia"]
+  },
+
+  "capabilities": [
+    {
+      "name": "agent.research",
+      "description": "Research a topic and return structured findings.",
+      "version": "1.0.0",
+      "replyEvent": "capability.result",
+      "inputSchema": {
+        "required": ["query"],
+        "optional": ["depth", "sessionId"],
+        "properties": {
+          "query":     { "type": "string" },
+          "depth":     { "type": "string", "enum": ["shallow", "deep"] },
+          "sessionId": { "type": "string" }
+        }
+      },
+      "outputSchema": {
+        "properties": {
+          "summary":    { "type": "string" },
+          "sources":    { "type": "array", "items": { "type": "string" } },
+          "confidence": { "type": "string" }
+        }
+      },
+      "exclusive": false,
+      "bidWeight": 1.0,
+      "tags": ["agent", "research"]
+    }
+  ],
+
+  "subscribes": [
+    "message.researcher",
+    "capability.bid.request",
+    "capability.result",
+    "system.error"
+  ],
+
+  "wildcardSubscribes": [
+    "blackboard.updated.session.research.*"
+  ],
+
+  "publishes": [
+    "capability.register",
+    "capability.result",
+    "capability.error",
+    "capability.invoke",
+    "capability.bid.response",
+    "blackboard.read",
+    "blackboard.write"
+  ],
+
+  "launch": {
+    "name":         "Researcher",
+    "command":      ["jbang", "../../../../agent/Agent.java", "."],
+    "order":        40,
+    "delayAfterMs": 300
+  }
+}

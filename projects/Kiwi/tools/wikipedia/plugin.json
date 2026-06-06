@@ -1,0 +1,52 @@
+{
+  "id": "tool-wikipedia",
+  "type": "tool",
+  "version": "1.0.0",
+  "description": "Fetches introductory extracts from Wikipedia articles. No API key required.",
+  "lifecycle": { "mode": "on-demand", "idleTimeoutSeconds": 300 },
+
+  "capabilities": [
+    {
+      "name": "tool.wikipedia.lookup",
+      "description": "Fetches introductory extract from a Wikipedia article.",
+      "version": "1.0.0",
+      "triggerEvent": "capability.tool.wikipedia.lookup",
+      "replyEvent": "capability.result",
+      "inputSchema": {
+        "required": ["query"],
+        "optional": ["lang"],
+        "properties": {
+          "query": { "type": "string" },
+          "lang":  { "type": "string", "description": "Wikipedia language code, default 'en'" }
+        }
+      },
+      "outputSchema": {
+        "type": "string",
+        "description": "Article title, URL, and introductory extract"
+      },
+      "exclusive": false,
+      "bidWeight": 1.0,
+      "tags": ["tool", "wikipedia", "knowledge"],
+      "internal": true
+    }
+  ],
+
+  "subscribes": [
+    "capability.tool.wikipedia.lookup",
+    "capability.bid.request"
+  ],
+
+  "publishes": [
+    "capability.register",
+    "capability.result",
+    "capability.error",
+    "capability.bid.response"
+  ],
+
+  "launch": {
+    "name":         "Wikipedia",
+    "command":      ["jbang", "WikipediaTool.java"],
+    "order":        30,
+    "delayAfterMs": 500
+  }
+}

@@ -1,0 +1,75 @@
+{
+  "id": "planner",
+  "type": "agent",
+  "version": "1.0.0",
+  "description": "On-demand planning agent. Analyzes complex multi-step tasks and returns an executable DAG for the WorkflowEngine.",
+
+  "lifecycle": {
+    "mode": "on-demand",
+    "idleTimeoutSeconds": 1800
+  },
+
+  "llm": {
+    "model": "google/gemini-3.5-flash",
+    "baseUrl": "https://openrouter.ai/api/v1",
+    "apiKeyEnv": "OPENROUTER_API_KEY",
+    "maxTokens": 8192,
+    "temperature": 0.1
+  },
+
+  "agent": {
+    "skillsDir": ".",
+    "maxRounds": 5,
+    "maxDelegations": 0,
+    "maxToolCalls": 2,
+    "maxConcurrentMissions": 2,
+    "seeInternalTools": false,
+    "toolTags": ["filesystem", "awareness", "discovery"]
+  },
+
+  "capabilities": [
+    {
+      "name": "agent.plan",
+      "description": "Analyze a complex multi-step task and return an executable DAG. The DAG maps sub-tasks to available capabilities with dependencies and failure policies.",
+      "version": "1.0.0",
+      "replyEvent": "capability.result",
+      "inputSchema": {
+        "required": ["task"],
+        "optional": ["context", "sessionId"],
+        "properties": {
+          "task":      { "type": "string" },
+          "context":   { "type": "string" },
+          "sessionId": { "type": "string" }
+        }
+      },
+      "outputSchema": {
+        "properties": {
+          "tasks": { "type": "array", "description": "Array of task definitions for the WorkflowEngine" }
+        }
+      },
+      "exclusive": false,
+      "bidWeight": 1.0,
+      "tags": ["agent", "planning"]
+    }
+  ],
+
+  "subscribes": [
+    "message.planner",
+    "capability.bid.request",
+    "system.error"
+  ],
+
+  "publishes": [
+    "capability.register",
+    "capability.result",
+    "capability.error",
+    "capability.bid.response"
+  ],
+
+  "launch": {
+    "name":         "Planner",
+    "command":      ["jbang", "../../../../agent/Agent.java", "."],
+    "order":        40,
+    "delayAfterMs": 300
+  }
+}
