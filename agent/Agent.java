@@ -7,6 +7,7 @@
 //DEPS org.slf4j:slf4j-simple:2.0.9
 //DEPS org.xerial:sqlite-jdbc:3.46.1.3
 //SOURCES ../kernel/KernelEvent.java
+//SOURCES ../kernel/Log.java
 //SOURCES ../kernel/interceptors/plugin/PluginConfig.java
 //SOURCES ../kernel/interceptors/plugin/PluginBase.java
 //SOURCES AgentConfig.java

@@ -22,7 +22,10 @@ public class SkillLoader {
 
     public record DiscoveredTools(List<ToolSpecification> specs, Map<String, String> toolToCapability) {}
 
-    static final YearMonth TRAINING_CUTOFF = YearMonth.of(2024, 4);
+    static final YearMonth TRAINING_CUTOFF        = YearMonth.of(2024, 4);
+    static final int       STALE_MONTHS_THRESHOLD = 6;            // emit the "must use a tool" warning beyond this
+    static final int       DEFAULT_MAX_TOOL_CALLS = 10;           // fallback when config.agent() is absent
+    static final String    PERSONA_FILE           = "persona.md"; // loaded first, and the only file in lazy round 1
 
     static String loadSystemPrompt(String skillsDir, boolean lazyRound1,
                                    AgentConfig config) throws Exception {
@@ -34,13 +37,13 @@ public class SkillLoader {
         List<Path> mdFiles = Files.list(dir)
                 .filter(p -> p.toString().endsWith(".md"))
                 .sorted(Comparator.<Path, Integer>comparing(
-                        p -> p.getFileName().toString().equals("persona.md") ? 0 : 1)
+                        p -> p.getFileName().toString().equals(PERSONA_FILE) ? 0 : 1)
                         .thenComparing(Comparator.naturalOrder()))
                 .toList();
 
         if (lazyRound1) {
             mdFiles = mdFiles.stream()
-                    .filter(p -> p.getFileName().toString().equals("persona.md"))
+                    .filter(p -> p.getFileName().toString().equals(PERSONA_FILE))
                     .toList();
         }
 
@@ -122,12 +125,12 @@ public class SkillLoader {
 
         if (config == null) return s.toString();
 
-        int maxTC = config.agent() != null ? config.agent().maxToolCallsOrDefault() : 10;
+        int maxTC = config.agent() != null ? config.agent().maxToolCallsOrDefault() : DEFAULT_MAX_TOOL_CALLS;
         LocalDate today = LocalDate.now();
         YearMonth nowYM = YearMonth.from(today);
         long monthsStale = ChronoUnit.MONTHS.between(TRAINING_CUTOFF, nowYM);
 
-        if (monthsStale > 6) {
+        if (monthsStale > STALE_MONTHS_THRESHOLD) {
             if (round == 1 && toolCallsSoFar == 0) {
                 s.append("\n**⚠ MANDATORY**: Training data is ").append(monthsStale)
                  .append(" months old. For ANY query about current events, world leaders, recent news,")

@@ -3,6 +3,7 @@
 //DEPS com.fasterxml.jackson.core:jackson-databind:2.17.2
 //DEPS com.fasterxml.jackson.datatype:jackson-datatype-jsr310:2.17.2
 //SOURCES ../../../kernel/KernelEvent.java
+//SOURCES ../../../kernel/Log.java
 //SOURCES ../../../kernel/interceptors/plugin/PluginConfig.java
 //SOURCES ../../../kernel/interceptors/plugin/PluginBase.java
 
@@ -47,11 +48,12 @@ public class WordCountTool {
     }
 
     void start() throws Exception {
-        System.out.println("[WORD-COUNT] Starting (on-demand)...");
+        Log.rawInfo("[WORD-COUNT] Starting (on-demand)...");
         PluginBase.run("plugin.json", KernelEvent.DEFAULT_SOCKET, this::handle);
     }
 
     void handle(String json, OutputStream out) throws Exception {
+        Log.configure(SOURCE_ID, out);
         KernelEvent event = KernelEvent.MAPPER.readValue(json, KernelEvent.class);
 
         // Only handle our trigger event
@@ -65,7 +67,7 @@ public class WordCountTool {
             return;
         }
 
-        System.out.println("[WORD-COUNT] Counting: " + text.length() + " chars");
+        Log.rawInfo("[WORD-COUNT] Counting: " + text.length() + " chars");
 
         // ── Analysis ──────────────────────────────────────────────────────────
         String[] tokens     = text.split("\\s+");
@@ -107,7 +109,7 @@ public class WordCountTool {
                         SOURCE_ID, event.correlationId(), event.sessionId()),
                 out);
 
-        System.out.println("[WORD-COUNT] Done — words=" + wordCount
+        Log.rawInfo("[WORD-COUNT] Done — words=" + wordCount
                 + " sentences=" + sentenceCount + " unique=" + freq.size());
     }
 

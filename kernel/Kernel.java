@@ -9,6 +9,7 @@
 //SOURCES interceptors/capability/CapabilityInterceptor.java
 //SOURCES interceptors/idempotency/IdempotencyInterceptor.java
 //SOURCES interceptors/blackboard/BlackboardInterceptor.java
+//SOURCES interceptors/log/LogInterceptor.java
 
 import com.fasterxml.jackson.databind.JsonNode;
 import java.io.IOException;

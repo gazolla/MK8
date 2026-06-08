@@ -99,11 +99,24 @@ public class ConsolePlugin {
                 String pendingKey = awaitingSecretKey;
                 if (pendingKey != null) {
                     if (raw.isBlank()) { prompt(); continue; }
+                    // Don't capture control commands as the secret — let them cancel/quit instead.
+                    String ctl = raw.trim().toLowerCase();
+                    if (ctl.equals("/quit") || ctl.equals("/exit") || ctl.equals("/cancel")) {
+                        awaitingSecretKey = null;
+                        printStatus("(captura de segredo cancelada)");
+                        if (!ctl.equals("/cancel")) System.exit(0);
+                        prompt(); continue;
+                    }
                     awaitingSecretKey = null;
                     String payload = KernelEvent.MAPPER.writeValueAsString(Map.of(
                             "name", "secret.set", "input", Map.of("key", pendingKey, "value", raw)));
                     PluginBase.publish(KernelEvent.of(EVT_CAPABILITY_INVOKE, payload, SOURCE_ID), out);
                     printStatus("✅ Segredo salvo com segurança (não exibido).");
+                    // The value went to the vault out-of-band — invisible to the assistant's chat.
+                    // Nudge it (in-conversation) so it retries the action that needed the secret.
+                    String nudge = KernelEvent.MAPPER.writeValueAsString(Map.of("text",
+                            "O segredo solicitado foi configurado com sucesso. Execute novamente a ação que o solicitou."));
+                    PluginBase.publish(KernelEvent.of(EVT_CHAT_PROMPT, nudge, SOURCE_ID), out);
                     prompt();
                     continue;
                 }

@@ -199,12 +199,22 @@ public class TelegramPlugin {
             // It goes straight to the vault and is deleted — it never reaches the LLM.
             String pendingKey = awaitingSecret.remove(chatId);
             if (pendingKey != null) {
+                if (text.equalsIgnoreCase("/cancel")) {
+                    bot.execute(new SendMessage(chatId, "Captura de segredo cancelada."));
+                    return;
+                }
                 String payload = KernelEvent.MAPPER.writeValueAsString(Map.of(
                         "name", "secret.set", "input", Map.of("key", pendingKey, "value", text)));
                 PluginBase.publishSafe(KernelEvent.of("capability.invoke", payload, pluginId), out);
                 try { bot.execute(new DeleteMessage(chatId, msg.messageId())); } catch (Exception ignored) {}
                 bot.execute(new SendMessage(chatId, "✅ Segredo salvo com segurança."));
                 log("secret captured (redacted) chatId=" + chatId);
+                // Nudge the assistant (in-conversation) to retry the action that needed the secret.
+                String sid = chatToSession.computeIfAbsent(chatId, id -> "tg-" + id);
+                sessionToChat.putIfAbsent(sid, chatId);
+                String nudge = KernelEvent.MAPPER.writeValueAsString(Map.of("text",
+                        "O segredo solicitado foi configurado com sucesso. Execute novamente a ação que o solicitou."));
+                PluginBase.publishSafe(KernelEvent.withSession("chat.prompt", nudge, pluginId, sid), out);
                 return;
             }
 

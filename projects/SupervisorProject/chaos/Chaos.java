@@ -3,6 +3,7 @@
 //DEPS com.fasterxml.jackson.core:jackson-databind:2.17.2
 //DEPS com.fasterxml.jackson.datatype:jackson-datatype-jsr310:2.17.2
 //SOURCES ../../../kernel/KernelEvent.java
+//SOURCES ../../../kernel/Log.java
 //SOURCES ../../../kernel/interceptors/plugin/PluginConfig.java
 //SOURCES ../../../kernel/interceptors/plugin/PluginBase.java
 
@@ -50,7 +51,7 @@ public class Chaos {
 
     public static void main(String[] args) throws Exception {
         KernelEvent.initLogging();
-        System.out.println("[CHAOS] Starting...");
+        Log.rawInfo("[CHAOS] Starting...");
         new Chaos().start();
     }
 
@@ -59,11 +60,12 @@ public class Chaos {
     }
 
     void handle(String json, OutputStream out) throws Exception {
+        Log.configure(SOURCE_ID, out);
         KernelEvent event = KernelEvent.MAPPER.readValue(json, KernelEvent.class);
         switch (event.type()) {
             case EVT_PLUGIN_READY -> { if (started.compareAndSet(false, true)) runSequence(out); }
             case EVT_SPAWNED      -> onSpawned(event);
-            case EVT_CRASHED      -> System.out.println("[CHAOS] ⛔ system.plugin.crashed: " + event.payload());
+            case EVT_CRASHED      -> Log.rawInfo("[CHAOS] ⛔ system.plugin.crashed: " + event.payload());
             case EVT_CAP_RESULT   -> resolve(event);
         }
     }
@@ -83,33 +85,33 @@ public class Chaos {
         Thread.ofVirtual().start(() -> {
             try {
                 Thread.sleep(WARMUP_MS);
-                System.out.println("\n[CHAOS] === CRASH DETECTION & AUTO-RESTART TEST ===\n");
+                Log.rawInfo("\n[CHAOS] === CRASH DETECTION & AUTO-RESTART TEST ===\n");
 
                 long pid = findHeartbeatPid(out);
-                System.out.println("[CHAOS] 1) Heartbeat discovered via system.plugin.list — pid=" + pid);
-                if (pid <= 0) { System.out.println("[CHAOS] ⚠️  heartbeat not found"); System.exit(1); }
+                Log.rawInfo("[CHAOS] 1) Heartbeat discovered via system.plugin.list — pid=" + pid);
+                if (pid <= 0) { Log.rawInfo("[CHAOS] ⚠️  heartbeat not found"); System.exit(1); }
 
-                System.out.println("[CHAOS] 2) Simulating crash — killing pid=" + pid);
+                Log.rawInfo("[CHAOS] 2) Simulating crash — killing pid=" + pid);
                 ProcessHandle.of(pid).ifPresent(ProcessHandle::destroyForcibly);
 
                 boolean autoOk = autoRestarted.await(WAIT_S, TimeUnit.SECONDS);
                 long newPid = autoOk ? findHeartbeatPid(out) : -1;
-                System.out.println("[CHAOS] 3) Auto-restart " + (autoOk
+                Log.rawInfo("[CHAOS] 3) Auto-restart " + (autoOk
                         ? "✅ observed (new pid=" + newPid + ", was " + pid + ")"
                         : "⚠️  NOT observed within " + WAIT_S + "s"));
 
-                System.out.println("\n[CHAOS] 4) Invoking manual capability " + CAP_RESTART + " {id:heartbeat}...");
+                Log.rawInfo("\n[CHAOS] 4) Invoking manual capability " + CAP_RESTART + " {id:heartbeat}...");
                 KernelEvent r = invoke(CAP_RESTART, Map.of("name", CAP_RESTART, "id", TARGET), out);
                 String manualMsg = KernelEvent.MAPPER.readTree(r.payload()).path("result").asText("?");
                 boolean manOk = manualMsg.startsWith("Restarted");
-                System.out.println("[CHAOS] 5) Manual restart " + (manOk ? "✅" : "⚠️ ") + " result: \"" + manualMsg + "\"");
+                Log.rawInfo("[CHAOS] 5) Manual restart " + (manOk ? "✅" : "⚠️ ") + " result: \"" + manualMsg + "\"");
 
-                System.out.println("\n[CHAOS] " + (autoOk && manOk
+                Log.rawInfo("\n[CHAOS] " + (autoOk && manOk
                         ? "✅ Supervision test complete — crash detection, auto-restart, and manual restart all work."
                         : "⚠️  Supervision test finished with warnings."));
                 System.exit(autoOk && manOk ? 0 : 1);
             } catch (Exception e) {
-                System.err.println("[CHAOS] Error: " + e.getMessage());
+                Log.rawError("[CHAOS] Error: " + e.getMessage());
                 System.exit(1);
             }
         });

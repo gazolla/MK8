@@ -3,6 +3,7 @@
 //DEPS com.fasterxml.jackson.core:jackson-databind:2.17.2
 //DEPS com.fasterxml.jackson.datatype:jackson-datatype-jsr310:2.17.2
 //SOURCES ../../../kernel/KernelEvent.java
+//SOURCES ../../../kernel/Log.java
 //SOURCES ../../../kernel/interceptors/plugin/PluginConfig.java
 //SOURCES ../../../kernel/interceptors/plugin/PluginBase.java
 
@@ -40,7 +41,7 @@ public class Producer {
 
     public static void main(String[] args) throws Exception {
         KernelEvent.initLogging();
-        System.out.println("[PRODUCER] Starting...");
+        Log.rawInfo("[PRODUCER] Starting...");
         new Producer().start();
     }
 
@@ -49,6 +50,7 @@ public class Producer {
     }
 
     void handle(String json, OutputStream out) throws Exception {
+        Log.configure(SOURCE_ID, out);
         KernelEvent event = KernelEvent.MAPPER.readValue(json, KernelEvent.class);
 
         if (EVT_PLUGIN_READY.equals(event.type()) && started.compareAndSet(false, true)) {
@@ -58,27 +60,27 @@ public class Producer {
                     Thread.sleep(CONSUMER_WARMUP_MS); // give Consumer time to register
                     sendItems(out);
                 } catch (Exception e) {
-                    System.err.println("[PRODUCER] Error: " + e.getMessage());
+                    Log.rawError("[PRODUCER] Error: " + e.getMessage());
                 }
             });
         }
     }
 
     void sendItems(OutputStream out) throws Exception {
-        System.out.println("[PRODUCER] Dispatching " + ITEM_COUNT + " items...\n");
+        Log.rawInfo("[PRODUCER] Dispatching " + ITEM_COUNT + " items...\n");
 
         for (int i = 1; i <= ITEM_COUNT; i++) {
             String payload = KernelEvent.MAPPER.writeValueAsString(
                     Map.of("seq", i, "value", "Item-" + i));
             PluginBase.publish(KernelEvent.of(EVT_DATA_ITEM, payload, SOURCE_ID), out);
-            System.out.println("[PRODUCER] → sent item #" + i + "  (value=Item-" + i + ")");
+            Log.rawInfo("[PRODUCER] → sent item #" + i + "  (value=Item-" + i + ")");
             Thread.sleep(DELAY_MS);
         }
 
         PluginBase.publish(KernelEvent.of(EVT_DATA_DONE,
                 KernelEvent.MAPPER.writeValueAsString(Map.of("total", ITEM_COUNT)),
                 SOURCE_ID), out);
-        System.out.println("\n[PRODUCER] → sent data.done. All " + ITEM_COUNT + " items dispatched.");
+        Log.rawInfo("\n[PRODUCER] → sent data.done. All " + ITEM_COUNT + " items dispatched.");
 
         // publish() writes synchronously, so the data.done frame is already on the
         // socket. Exit cleanly — mirrors Consumer's System.exit(0) on data.done —

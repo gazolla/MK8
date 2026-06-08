@@ -3,6 +3,7 @@
 //DEPS com.fasterxml.jackson.core:jackson-databind:2.17.2
 //DEPS com.fasterxml.jackson.datatype:jackson-datatype-jsr310:2.17.2
 //SOURCES ../../../kernel/KernelEvent.java
+//SOURCES ../../../kernel/Log.java
 //SOURCES ../../../kernel/interceptors/plugin/PluginConfig.java
 //SOURCES ../../../kernel/interceptors/plugin/PluginBase.java
 
@@ -52,11 +53,12 @@ public class SummaryAgent {
     }
 
     void start() throws Exception {
-        System.out.println("[SUMMARY-AGENT] Starting...");
+        Log.rawInfo("[SUMMARY-AGENT] Starting...");
         PluginBase.run("plugin.json", KernelEvent.DEFAULT_SOCKET, this::handle);
     }
 
     void handle(String json, OutputStream out) throws Exception {
+        Log.configure(SOURCE_ID, out);
         KernelEvent event = KernelEvent.MAPPER.readValue(json, KernelEvent.class);
 
         switch (event.type()) {
@@ -72,7 +74,7 @@ public class SummaryAgent {
         JsonNode payload = KernelEvent.MAPPER.readTree(event.payload());
         String   text    = payload.path("text").asText("").trim();
 
-        System.out.println("[SUMMARY-AGENT] Analyze request: \""
+        Log.rawInfo("[SUMMARY-AGENT] Analyze request: \""
                 + text.substring(0, Math.min(text.length(), 60)) + "...\"");
 
         if (text.isBlank()) {
@@ -100,7 +102,7 @@ public class SummaryAgent {
                         SOURCE_ID, innerCorrId, event.sessionId()),
                 out);
 
-        System.out.println("[SUMMARY-AGENT] Delegated to text.wordcount corrId=" + innerCorrId);
+        Log.rawInfo("[SUMMARY-AGENT] Delegated to text.wordcount corrId=" + innerCorrId);
     }
 
     // ── Step 2: receive tool result → build summary → reply to DemoRunner ────
@@ -114,7 +116,7 @@ public class SummaryAgent {
             return;
         }
 
-        System.out.println("[SUMMARY-AGENT] Tool result received corrId=" + corrId);
+        Log.rawInfo("[SUMMARY-AGENT] Tool result received corrId=" + corrId);
 
         // Parse the nested result (WordCountTool wraps it in { "result": "...json..." })
         JsonNode wrapper = KernelEvent.MAPPER.readTree(event.payload());
@@ -152,7 +154,7 @@ public class SummaryAgent {
 
         JsonNode err = KernelEvent.MAPPER.readTree(event.payload());
         String reason = err.path("reason").asText("unknown error");
-        System.err.println("[SUMMARY-AGENT] Tool error: " + reason);
+        Log.rawError("[SUMMARY-AGENT] Tool error: " + reason);
         publishResult(ctx.outerCorrelationId(), ctx.sessionId(),
                 "Analysis failed: " + reason, out);
     }
@@ -167,7 +169,7 @@ public class SummaryAgent {
                 KernelEvent.withCorrelation(EVT_CAPABILITY_RESULT, payload,
                         SOURCE_ID, corrId, sessionId),
                 out);
-        System.out.println("[SUMMARY-AGENT] Result sent corrId=" + corrId);
+        Log.rawInfo("[SUMMARY-AGENT] Result sent corrId=" + corrId);
     }
 
     String buildTopWordsSummary(JsonNode stats) {

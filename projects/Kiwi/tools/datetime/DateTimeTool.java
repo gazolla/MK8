@@ -35,14 +35,15 @@ public class DateTimeTool {
         try {
             JsonNode payload  = KernelEvent.MAPPER.readTree(event.payload());
             JsonNode input    = payload.has("input") ? payload.get("input") : KernelEvent.MAPPER.createObjectNode();
-            String tzId       = input.has("timezone") ? input.get("timezone").asText("UTC") : "UTC";
+            // No timezone given → use the host's zone (consistent with the user's locale, not hardcoded UTC).
+            String tzId       = input.hasNonNull("timezone") ? input.get("timezone").asText() : ZoneId.systemDefault().getId();
 
             ZoneId zone;
             try {
                 zone = ZoneId.of(tzId);
             } catch (Exception e) {
-                zone = ZoneId.of("UTC");
-                log("WARN: Unknown timezone '" + tzId + "', defaulting to UTC", out);
+                zone = ZoneId.systemDefault();
+                log("WARN: Unknown timezone '" + tzId + "', defaulting to " + zone.getId());
             }
 
             String now = ZonedDateTime.now(zone).format(DateTimeFormatter.ISO_OFFSET_DATE_TIME);
@@ -52,7 +53,7 @@ public class DateTimeTool {
                     KernelEvent.withCorrelation("capability.result", result, "tool-datetime",
                             event.correlationId(), event.sessionId()),
                     out);
-            log("Responded: " + now, out);
+            log("Responded: " + now);
 
         } catch (Exception e) {
             String errPayload = KernelEvent.MAPPER.writeValueAsString(Map.of("reason", e.getMessage()));
@@ -60,11 +61,11 @@ public class DateTimeTool {
                     KernelEvent.withCorrelation("capability.error", errPayload, "tool-datetime",
                             event.correlationId(), event.sessionId()),
                     out);
-            log("ERROR: " + e.getMessage(), out);
+            log("ERROR: " + e.getMessage());
         }
     }
 
-    static void log(String msg, OutputStream out) {
+    static void log(String msg) {
         System.out.println("[TOOL-DATETIME] " + msg);
     }
 }

@@ -65,6 +65,10 @@ public class Stop {
         patterns.add("Kernel.java"); // always present — no plugin.json boot entry
         patterns.add("Kernel.jar");
         patterns.add("Agent.java");  // structural agent runtime (shared, launched per persona)
+        patterns.add("Boot.java");   // the launcher — not a plugin (jbang Boot.java --dev)
+        patterns.add("Boot.jar");
+        patterns.add("Start.java");  // interactive entry point (thin wrapper over Boot)
+        patterns.add("Start.jar");
         try {
             Files.walk(root)
                 .filter(p -> p.getFileName().toString().equals("plugin.json"))

@@ -61,7 +61,7 @@ public class Start {
                     "jbang", "Kernel.java",
                     "--logs=" + logsDir.getAbsolutePath(),
                     "--scan=" + projDir.toFile().getAbsolutePath(),
-                    "PluginInterceptor");
+                    "PluginInterceptor", "LogInterceptor");
 
             waitForSocket();
 

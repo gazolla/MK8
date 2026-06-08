@@ -4,6 +4,7 @@
 //DEPS com.fasterxml.jackson.datatype:jackson-datatype-jsr310:2.17.2
 //DEPS dev.langchain4j:langchain4j-open-ai:0.36.2
 //SOURCES ../../../kernel/KernelEvent.java
+//SOURCES ../../../kernel/Log.java
 //SOURCES ../../../kernel/interceptors/plugin/PluginConfig.java
 //SOURCES ../../../kernel/interceptors/plugin/PluginBase.java
 
@@ -65,7 +66,7 @@ public class Agent {
 
         String apiKey = System.getenv(config.llmApiKeyEnv());
         if (apiKey == null || apiKey.isBlank()) {
-            System.err.println("[" + id() + "] WARNING: env var '"
+            Log.rawError("[" + id() + "] WARNING: env var '"
                     + config.llmApiKeyEnv() + "' is not set — LLM calls will fail.");
             apiKey = "missing-api-key";
         }
@@ -80,18 +81,19 @@ public class Agent {
 
         history.add(SystemMessage.from(SYSTEM_PROMPT));
 
-        System.out.println("[" + id() + "] Initialized — model=" + config.llmModel()
+        Log.rawInfo("[" + id() + "] Initialized — model=" + config.llmModel()
                 + " url=" + config.llmBaseUrl());
     }
 
     void start() throws Exception {
-        System.out.println("[" + id() + "] Starting...");
+        Log.rawInfo("[" + id() + "] Starting...");
         PluginBase.run("plugin.json", KernelEvent.DEFAULT_SOCKET, this::handle);
     }
 
     // ── Event dispatch ────────────────────────────────────────────────────────
 
     void handle(String json, OutputStream out) throws Exception {
+        Log.configure(config.id(), out);
         KernelEvent event = KernelEvent.MAPPER.readValue(json, KernelEvent.class);
 
         if (event.type().equals(EVT_CHAT_PROMPT)
@@ -100,7 +102,7 @@ public class Agent {
         } else if (event.type().equals(EVT_CAP_RESULT)) {
             handleCapabilityResult(event);
         } else if (event.type().equals(EVT_SYSTEM_ERROR)) {
-            System.err.println("[" + id() + "] System error: " + event.payload());
+            Log.rawError("[" + id() + "] System error: " + event.payload());
         }
     }
 
@@ -111,7 +113,7 @@ public class Agent {
         String   text = p.path("text").asText(p.path("message").asText("")).trim();
         if (text.isBlank()) return;
 
-        System.out.println("[" + id() + "] Prompt: "
+        Log.rawInfo("[" + id() + "] Prompt: "
                 + text.substring(0, Math.min(text.length(), 80)));
 
         PluginBase.publish(KernelEvent.of(EVT_CHAT_THINKING,
@@ -127,10 +129,10 @@ public class Agent {
                         KernelEvent.MAPPER.writeValueAsString(
                                 Map.of("response", response)),
                         config.id()), out);
-                System.out.println("[" + id() + "] Response sent ("
+                Log.rawInfo("[" + id() + "] Response sent ("
                         + response.length() + " chars).");
             } catch (Exception e) {
-                System.err.println("[" + id() + "] LLM error: " + e.getMessage());
+                Log.rawError("[" + id() + "] LLM error: " + e.getMessage());
                 try {
                     PluginBase.publish(KernelEvent.of(EVT_CHAT_RESPONSE,
                             KernelEvent.MAPPER.writeValueAsString(Map.of(
@@ -143,7 +145,7 @@ public class Agent {
 
     void handleCapabilityResult(KernelEvent event) {
         // Future: tool use / multi-step delegation
-        System.out.println("[" + id() + "] Capability result corrId=" + event.correlationId());
+        Log.rawInfo("[" + id() + "] Capability result corrId=" + event.correlationId());
     }
 
     // ── LLM call (synchronized — one at a time for shared history) ───────────

@@ -3,6 +3,7 @@
 //DEPS com.fasterxml.jackson.core:jackson-databind:2.17.2
 //DEPS com.fasterxml.jackson.datatype:jackson-datatype-jsr310:2.17.2
 //SOURCES ../../../kernel/KernelEvent.java
+//SOURCES ../../../kernel/Log.java
 //SOURCES ../../../kernel/interceptors/plugin/PluginConfig.java
 //SOURCES ../../../kernel/interceptors/plugin/PluginBase.java
 
@@ -57,7 +58,7 @@ public class Reader {
 
     public static void main(String[] args) throws Exception {
         KernelEvent.initLogging();
-        System.out.println("[READER] Starting...");
+        Log.rawInfo("[READER] Starting...");
         new Reader().start();
     }
 
@@ -66,6 +67,7 @@ public class Reader {
     }
 
     void handle(String json, OutputStream out) throws Exception {
+        Log.configure(SOURCE_ID, out);
         KernelEvent event = KernelEvent.MAPPER.readValue(json, KernelEvent.class);
         String type = event.type();
 
@@ -74,7 +76,7 @@ public class Reader {
         } else if (EVT_READ_RESULT.equals(type) || EVT_QUERY_RESULT.equals(type)) {
             resolve(event);
         } else if (type.startsWith(EVT_UPDATED_PREFIX)) {
-            System.out.println("[READER] 🔔 reactive notification: " + type + " → " + event.payload());
+            Log.rawInfo("[READER] 🔔 reactive notification: " + type + " → " + event.payload());
             updatedLatch.countDown();
         }
     }
@@ -91,7 +93,7 @@ public class Reader {
             try {
                 Thread.sleep(WARMUP_MS); // give the Writer time to populate the blackboard
 
-                System.out.println("\n[READER] === BLACKBOARD ROUND-TRIP TEST ===\n");
+                Log.rawInfo("\n[READER] === BLACKBOARD ROUND-TRIP TEST ===\n");
 
                 // 1. Cross-process read HIT
                 printRead("read HIT  greeting", read("greeting", out));
@@ -102,19 +104,19 @@ public class Reader {
                 // 3. query by tag
                 JsonNode entries = KernelEvent.MAPPER
                         .readTree(query(List.of("doc"), out).payload()).path("entries");
-                System.out.println("[READER] query tag=[doc] → " + entries.size()
+                Log.rawInfo("[READER] query tag=[doc] → " + entries.size()
                         + " entr" + (entries.size() == 1 ? "y" : "ies") + ": " + entries);
 
                 // 4. reactive notification from the Writer's live write
-                System.out.println("\n[READER] waiting for live update notification...");
+                Log.rawInfo("\n[READER] waiting for live update notification...");
                 boolean got = updatedLatch.await(UPDATED_TIMEOUT_S, TimeUnit.SECONDS);
-                System.out.println("[READER] " + (got ? "✅ notification received"
+                Log.rawInfo("[READER] " + (got ? "✅ notification received"
                                                       : "⚠️  no notification (timeout)"));
 
-                System.out.println("\n[READER] ✅ Blackboard test complete.");
+                Log.rawInfo("\n[READER] ✅ Blackboard test complete.");
                 System.exit(0);
             } catch (Exception e) {
-                System.err.println("[READER] Error: " + e.getMessage());
+                Log.rawError("[READER] Error: " + e.getMessage());
                 System.exit(1);
             }
         });
@@ -145,11 +147,11 @@ public class Reader {
     void printRead(String label, KernelEvent ev) throws Exception {
         JsonNode r = KernelEvent.MAPPER.readTree(ev.payload());
         if (!r.path("found").asBoolean(true)) {
-            System.out.println("[READER] " + label + " → (not found)");
+            Log.rawInfo("[READER] " + label + " → (not found)");
         } else {
             // Stored values are JSON-encoded; decode the value node for display
             String value = KernelEvent.MAPPER.readTree(r.path("value").asText()).asText();
-            System.out.println("[READER] " + label + " → value=\"" + value + "\" v" + r.path("version").asLong());
+            Log.rawInfo("[READER] " + label + " → value=\"" + value + "\" v" + r.path("version").asLong());
         }
     }
 }

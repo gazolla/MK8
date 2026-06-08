@@ -25,6 +25,10 @@ import java.util.*;
  */
 public class SessionStore {
 
+    // ── Tuning ──────────────────────────────────────────────────────────────────
+    static final int    MAX_TOOL_TEXT  = 800;                // truncate persisted tool outputs
+    static final String EMPTY_RESPONSE = "[Empty response]";
+
     private final String agentId;
     private final Path   dbPath;
     private Connection   conn;
@@ -188,7 +192,7 @@ public class SessionStore {
             n.put("toolName", tr.toolName());
             // Truncate large tool outputs — rarely meaningful after the round ends
             String text = tr.text() != null ? tr.text() : "";
-            n.put("text", text.length() > 800 ? text.substring(0, 800) + "…" : text);
+            n.put("text", text.length() > MAX_TOOL_TEXT ? text.substring(0, MAX_TOOL_TEXT) + "…" : text);
         } else {
             return null; // skip SystemMessage — regenerated dynamically
         }
@@ -199,7 +203,7 @@ public class SessionStore {
         String role = n.path("role").asText("");
         String text = n.path("text").asText("");
         if (text.isBlank()) {
-            text = "[Empty response]";
+            text = EMPTY_RESPONSE;
         }
         final String finalText = text;
         return switch (role) {

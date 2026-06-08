@@ -3,6 +3,7 @@
 //DEPS com.fasterxml.jackson.core:jackson-databind:2.17.2
 //DEPS com.fasterxml.jackson.datatype:jackson-datatype-jsr310:2.17.2
 //SOURCES ../../../kernel/KernelEvent.java
+//SOURCES ../../../kernel/Log.java
 //SOURCES ../../../kernel/interceptors/plugin/PluginConfig.java
 //SOURCES ../../../kernel/interceptors/plugin/PluginBase.java
 
@@ -45,7 +46,7 @@ public class Writer {
 
     public static void main(String[] args) throws Exception {
         KernelEvent.initLogging();
-        System.out.println("[WRITER] Starting...");
+        Log.rawInfo("[WRITER] Starting...");
         new Writer().start();
     }
 
@@ -54,6 +55,7 @@ public class Writer {
     }
 
     void handle(String json, OutputStream out) throws Exception {
+        Log.configure(SOURCE_ID, out);
         KernelEvent event = KernelEvent.MAPPER.readValue(json, KernelEvent.class);
         switch (event.type()) {
             case EVT_PLUGIN_READY   -> { if (started.compareAndSet(false, true)) onReady(out); }
@@ -80,7 +82,7 @@ public class Writer {
                 write("live", "late update", List.of(), out);
                 log("→ live write published (fires blackboard.updated." + SCOPE + ".live)");
             } catch (Exception e) {
-                System.err.println("[WRITER] Error: " + e.getMessage());
+                Log.rawError("[WRITER] Error: " + e.getMessage());
             }
         });
     }
@@ -102,5 +104,5 @@ public class Writer {
         log("→ write " + key + "=\"" + value + "\" expectedVersion=" + expectedVersion);
     }
 
-    static void log(String msg) { System.out.println("[WRITER] " + msg); }
+    static void log(String msg) { Log.rawInfo("[WRITER] " + msg); }
 }

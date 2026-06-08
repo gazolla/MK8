@@ -15,6 +15,21 @@ import java.util.*;
  */
 public class MissionRunner {
 
+    // ── Defaults (used when config.agent() is absent) ───────────────────────────
+    static final int  DEFAULT_MAX_ROUNDS      = 5;
+    static final int  DEFAULT_MAX_TOOL_CALLS   = 20;
+    static final int  DEFAULT_MAX_DELEGATIONS  = 3;
+
+    // ── Tuning ──────────────────────────────────────────────────────────────────
+    static final String PREFIX_AGENT_TOOL      = "agent_";   // delegations vs. plain tools
+    static final String SCOPE_SESSION          = "session";
+    static final int    DEDUP_THRESHOLD        = 3;           // identical call count that triggers a stop
+    static final int    DEDUP_ARGS_MAX         = 200;         // args prefix length used as dedup key
+    static final int    TOOL_RESULT_MAX        = 4_000;       // truncate plain tool outputs
+    static final int    DELEGATION_RESULT_MAX  = 64_000;      // truncate sub-agent outputs
+    static final long   RESEARCH_CACHE_TTL_SECONDS = 1_800;   // cache a successful researched answer
+    static final String EMPTY_RESPONSE         = "[Empty response]";
+
     private final AgentCore core;
     private final CapabilityRouter router;
     private final BlackboardClient blackboard;
@@ -39,9 +54,9 @@ public class MissionRunner {
              String originalQuery, OutputStream out) throws Exception {
 
         boolean chatMode   = correlationId == null;
-        int maxRounds      = core.config.agent() != null ? core.config.agent().maxRoundsOrDefault()      : 5;
-        int maxToolCalls   = core.config.agent() != null ? core.config.agent().maxToolCallsOrDefault()   : 20;
-        int maxDelegations = core.config.agent() != null ? core.config.agent().maxDelegationsOrDefault() : 3;
+        int maxRounds      = core.config.agent() != null ? core.config.agent().maxRoundsOrDefault()      : DEFAULT_MAX_ROUNDS;
+        int maxToolCalls   = core.config.agent() != null ? core.config.agent().maxToolCallsOrDefault()   : DEFAULT_MAX_TOOL_CALLS;
+        int maxDelegations = core.config.agent() != null ? core.config.agent().maxDelegationsOrDefault() : DEFAULT_MAX_DELEGATIONS;
 
         // Use cached prompt and tools from SkillLoader instance (refreshed on plugin.installed)
         String staticSystemPrompt = core.skillLoader.systemPrompt();
@@ -83,19 +98,19 @@ public class MissionRunner {
             }
             msgs.addAll(history);
 
-            core.log("DEBUG: message history sequence for session " + internalSession + ":");
+            core.logDebug("message history sequence for session " + internalSession + ":");
             for (int i = 0; i < msgs.size(); i++) {
                 ChatMessage m = msgs.get(i);
                 if (m instanceof SystemMessage sm) {
-                    core.log("  [" + i + "] SYSTEM: " + core.truncate(sm.text(), 80));
+                    core.logDebug("  [" + i + "] SYSTEM: " + core.truncate(sm.text(), 80));
                 } else if (m instanceof UserMessage um) {
-                    core.log("  [" + i + "] USER: " + core.truncate(um.singleText() != null ? um.singleText() : "", 80));
+                    core.logDebug("  [" + i + "] USER: " + core.truncate(um.singleText() != null ? um.singleText() : "", 80));
                 } else if (m instanceof AiMessage am) {
-                    core.log("  [" + i + "] ASSISTANT: text=" + (am.text() != null ? core.truncate(am.text(), 80) : "null") + ", toolCalls=" + am.hasToolExecutionRequests());
+                    core.logDebug("  [" + i + "] ASSISTANT: text=" + (am.text() != null ? core.truncate(am.text(), 80) : "null") + ", toolCalls=" + am.hasToolExecutionRequests());
                 } else if (m instanceof ToolExecutionResultMessage tm) {
-                    core.log("  [" + i + "] TOOL_RESULT: name=" + tm.toolName() + ", id=" + tm.id() + ", text=" + core.truncate(tm.text(), 80));
+                    core.logDebug("  [" + i + "] TOOL_RESULT: name=" + tm.toolName() + ", id=" + tm.id() + ", text=" + core.truncate(tm.text(), 80));
                 } else {
-                    core.log("  [" + i + "] UNKNOWN (" + m.getClass().getSimpleName() + ")");
+                    core.logDebug("  [" + i + "] UNKNOWN (" + m.getClass().getSimpleName() + ")");
                 }
             }
 
@@ -147,8 +162,8 @@ public class MissionRunner {
                 }
                 if (originalSession != null && originalQuery != null && hadSuccessfulTool
                         && !core.looksLikeHallucinatedToolCall(text)) {
-                    String cacheKey = "research.cache." + core.normalizeQueryKey(originalQuery);
-                    blackboard.write(cacheKey, "session", originalSession, text, 1800, out);
+                    blackboard.write(core.researchCacheKey(originalQuery), SCOPE_SESSION,
+                            originalSession, text, RESEARCH_CACHE_TTL_SECONDS, out);
                 }
                 core.publishAnswer(text, chatMode, correlationId, originalSession, originalQuery, out);
                 return text;
@@ -156,12 +171,13 @@ public class MissionRunner {
 
             for (ToolExecutionRequest req : ai.toolExecutionRequests()) {
                 String name = req.name();
+                boolean isDelegation = name.startsWith(PREFIX_AGENT_TOOL);
 
                 // Fix 6: dedup check BEFORE budget — dedup'd calls must not consume the tool budget
                 String argsKey = req.arguments() != null ? req.arguments() : "";
-                if (argsKey.length() > 200) argsKey = argsKey.substring(0, 200);
+                if (argsKey.length() > DEDUP_ARGS_MAX) argsKey = argsKey.substring(0, DEDUP_ARGS_MAX);
                 int callCount = toolCallCounts.merge(name + ":" + argsKey, 1, Integer::sum);
-                if (callCount >= 3) {
+                if (callCount >= DEDUP_THRESHOLD) {
                     memory.add(ToolExecutionResultMessage.from(req,
                         "Error: this exact tool call has been made " + callCount +
                         " times with identical arguments and returned the same result. " +
@@ -169,22 +185,22 @@ public class MissionRunner {
                     continue;
                 }
 
-                if (name.startsWith("agent_") && ++delegations > maxDelegations) {
+                if (isDelegation && ++delegations > maxDelegations) {
                     memory.add(ToolExecutionResultMessage.from(req,
                         "Error: max delegations reached (" + maxDelegations + ")"));
                     continue;
                 }
-                if (!name.startsWith("agent_") && ++toolCalls > maxToolCalls) {
+                if (!isDelegation && ++toolCalls > maxToolCalls) {
                     memory.add(ToolExecutionResultMessage.from(req,
                         "Error: max tool calls reached (" + maxToolCalls + ")"));
                     continue;
                 }
 
-                if (name.startsWith("agent_") && chatMode && originalSession != null) {
+                if (isDelegation && chatMode && originalSession != null) {
                     blackboard.writeConversationContext(memory, originalSession, out);
                 }
 
-                core.log((name.startsWith("agent_") ? "→ delegation" : "→ tool")
+                core.log((isDelegation ? "→ delegation" : "→ tool")
                         + " name=" + name + " session=" + internalSession);
 
                 // Fix 3: use local per-mission map instead of global static map
@@ -196,17 +212,17 @@ public class MissionRunner {
                     result = router.invokeCapability(originalCap, req.arguments(), originalSession, out);
                 }
 
-                core.log("← " + (name.startsWith("agent_") ? "delegation" : "tool")
+                core.log("← " + (isDelegation ? "delegation" : "tool")
                         + " result: " + core.truncate(result, 120));
 
                 if (result == null || !result.startsWith("Error:")) hadSuccessfulTool = true;
 
-                // Truncate overly long tool outputs at 4000 characters (64000 for delegations) to prevent context-window bloat
+                // Truncate overly long tool outputs to prevent context-window bloat
                 String processedResult = result != null ? result : "";
                 if (processedResult.isBlank()) {
-                    processedResult = "[Empty response]";
+                    processedResult = EMPTY_RESPONSE;
                 }
-                int maxLength = name.startsWith("agent_") ? 64000 : 4000;
+                int maxLength = isDelegation ? DELEGATION_RESULT_MAX : TOOL_RESULT_MAX;
                 if (processedResult.length() > maxLength) {
                     int originalLength = processedResult.length();
                     processedResult = processedResult.substring(0, maxLength)

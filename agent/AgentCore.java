@@ -29,6 +29,44 @@ import java.util.concurrent.atomic.*;
  */
 public class AgentCore {
 
+    // ── Event types ─────────────────────────────────────────────────────────────
+    static final String EVT_CHAT_PROMPT             = "chat.prompt";
+    static final String EVT_CHAT_RESPONSE           = "chat.response";
+    static final String EVT_CHAT_TYPING             = "chat.typing";
+    static final String EVT_CHAT_THINKING           = "chat.thinking";
+    static final String EVT_CAPABILITY_RESULT       = "capability.result";
+    static final String EVT_CAPABILITY_ERROR        = "capability.error";
+    static final String EVT_CAPABILITY_BID_REQUEST  = "capability.bid.request";
+    static final String EVT_CAPABILITY_BID_RESPONSE = "capability.bid.response";
+    static final String EVT_PLUGIN_INSTALLED        = "plugin.installed";
+    static final String EVT_BLACKBOARD_READ_RESULT  = "blackboard.read.result";
+    static final String EVT_AGENT_BUSY              = "agent.busy";
+    static final String EVT_AGENT_IDLE             = "agent.idle";
+    static final String EVT_AGENT_READY            = "agent.ready";
+    static final String PREFIX_MESSAGE             = "message.";
+    static final String PREFIX_CHAT                = "chat.";
+    static final String PREFIX_BLACKBOARD_UPDATED  = "blackboard.updated.";
+
+    // ── Blackboard keys & scopes ────────────────────────────────────────────────
+    static final String SCOPE_SESSION                = "session";
+    static final String BB_KEY_TASK_CONTEXT          = "task.context";
+    static final String BB_KEY_RESEARCH_CACHE_PREFIX = "research.cache.";
+
+    // ── Tuning ──────────────────────────────────────────────────────────────────
+    static final int    MAX_HISTORY                = 40;
+    static final int    LLM_MAX_RETRIES            = 3;
+    static final int    LLM_TIMEOUT_SECONDS        = 120;
+    static final int    SESSION_TTL_DAYS           = 90;
+    static final int    MAX_SESSIONS               = 1000;
+    static final long   RESEARCH_CACHE_TTL_SECONDS = 1800;
+    static final int    LOG_PAYLOAD_MAX            = 80;
+    static final int    LOG_PAYLOAD_MAX_ERROR      = 1000;
+
+    // ── Misc ────────────────────────────────────────────────────────────────────
+    static final String DEFAULT_SESSION   = "default";
+    static final String MISSING_API_KEY   = "missing-api-key";
+    static final String SPAWN_CORR_ENV    = "MK8_SPAWN_CORRELATION_ID";
+
     final AgentConfig config;
     final String agentDir;
     final String skillsDir;
@@ -48,6 +86,7 @@ public class AgentCore {
     AgentCore(String[] args) throws Exception {
         agentDir  = args.length > 0 ? args[0] : ".";
         config    = AgentConfig.load(agentDir + "/plugin.json");
+        Log.configure(config.id().toUpperCase(), null);   // stdout only until connected
         skillsDir = Path.of(agentDir).resolve(
                 config.agent() != null ? config.agent().skillsDir() : ".").toString();
 
@@ -61,7 +100,7 @@ public class AgentCore {
             String apiKey = System.getenv(lc.apiKeyEnvOrDefault());
             if (apiKey == null || apiKey.isBlank()) {
                 logError("env var '" + lc.apiKeyEnvOrDefault() + "' not set — LLM calls will fail until provided.");
-                apiKey = "missing-api-key";
+                apiKey = MISSING_API_KEY;
             }
             model = OpenAiChatModel.builder()
                     .apiKey(apiKey)
@@ -69,8 +108,8 @@ public class AgentCore {
                     .modelName(lc.modelOrDefault())
                     .temperature(lc.temperatureOrDefault())
                     .maxTokens(lc.maxTokensOrDefault())
-                    .maxRetries(3)
-                    .timeout(Duration.ofSeconds(120))
+                    .maxRetries(LLM_MAX_RETRIES)
+                    .timeout(Duration.ofSeconds(LLM_TIMEOUT_SECONDS))
                     .build();
         }
         llm = model;
@@ -87,20 +126,23 @@ public class AgentCore {
 
     void start(OutputStream out) throws Exception {
         globalOut = out;
-        registerCapabilities(out);
+        Log.configure(config.id().toUpperCase(), out);   // enable the consolidated bus sink
+        // DRY: reuse the shared capability registration in PluginBase (identical wire event).
+        PluginBase.registerCapabilities(config.plugin(), out);
+        log("Capabilities registered: " + config.capabilitiesOrEmpty().size());
 
         if (store != null) {
             store.open();
-            store.prune(90, 1000);
+            store.prune(SESSION_TTL_DAYS, MAX_SESSIONS);
         }
 
-        String spawnCorrId = System.getenv("MK8_SPAWN_CORRELATION_ID");
+        String spawnCorrId = System.getenv(SPAWN_CORR_ENV);
         if (spawnCorrId != null && !spawnCorrId.isBlank()) {
             try {
                 String readyPayload = KernelEvent.MAPPER.writeValueAsString(
                         Map.of("agentId", config.id(), "correlationId", spawnCorrId));
                 KernelEvent.writeFrame(out, KernelEvent.MAPPER.writeValueAsString(
-                        KernelEvent.withCorrelation("agent.ready", readyPayload,
+                        KernelEvent.withCorrelation(EVT_AGENT_READY, readyPayload,
                                 config.id(), spawnCorrId, null)));
                 log("published agent.ready corrId=" + spawnCorrId);
             } catch (Exception e) {
@@ -119,8 +161,8 @@ public class AgentCore {
             String type = event.type();
 
             // Structured logging for key event types
-            if (type.startsWith("chat.") || type.startsWith("capability.result")
-                    || type.startsWith("capability.error") || type.startsWith("message.")) {
+            if (type.startsWith(PREFIX_CHAT) || type.startsWith(EVT_CAPABILITY_RESULT)
+                    || type.startsWith(EVT_CAPABILITY_ERROR) || type.startsWith(PREFIX_MESSAGE)) {
                 boolean isError = type.contains("error");
                 StringBuilder sb = new StringBuilder("← ").append(type);
                 if (event.sessionId() != null && !event.sessionId().isBlank())
@@ -128,25 +170,25 @@ public class AgentCore {
                 if (event.correlationId() != null && !event.correlationId().isBlank())
                     sb.append(" corrId=").append(event.correlationId());
                 if (event.payload() != null)
-                    sb.append(" payload=").append(truncate(event.payload(), isError ? 1000 : 80));
+                    sb.append(" payload=").append(truncate(event.payload(), isError ? LOG_PAYLOAD_MAX_ERROR : LOG_PAYLOAD_MAX));
                 if (isError) logError(sb.toString()); else log(sb.toString());
             }
 
             try {
-                if (type.startsWith("message." + config.id())) {
+                if (type.startsWith(PREFIX_MESSAGE + config.id())) {
                     handleCapabilityInvoke(event, out);
                 } else switch (type) {
-                    case "chat.prompt"            -> handleChatPrompt(event, out);
-                    case "capability.result"      -> router.resolveInvocation(event);
-                    case "capability.error"       -> router.resolveInvocationError(event);
-                    case "capability.bid.request" -> handleCapabilityBidRequest(event, out);
-                    case "plugin.installed"       -> {
+                    case EVT_CHAT_PROMPT            -> handleChatPrompt(event, out);
+                    case EVT_CAPABILITY_RESULT      -> router.resolveInvocation(event);
+                    case EVT_CAPABILITY_ERROR       -> router.resolveInvocationError(event);
+                    case EVT_CAPABILITY_BID_REQUEST -> handleCapabilityBidRequest(event, out);
+                    case EVT_PLUGIN_INSTALLED       -> {
                         try { skillLoader.refresh(out); log("SkillLoader refreshed — new plugin available"); }
                         catch (Exception e) { logError("SkillLoader refresh failed: " + e.getMessage()); }
                     }
-                    case "blackboard.read.result" -> blackboard.resolve(event);
+                    case EVT_BLACKBOARD_READ_RESULT -> blackboard.resolve(event);
                     default -> {
-                        if (!type.startsWith("blackboard.updated.")) {
+                        if (!type.startsWith(PREFIX_BLACKBOARD_UPDATED)) {
                             log("← unhandled event type: " + type);
                         }
                     }
@@ -165,17 +207,17 @@ public class AgentCore {
     // ── CHAT mode: chat.prompt → LLM → chat.response ─────────────────────────
 
     void handleChatPrompt(KernelEvent event, OutputStream out) throws Exception {
-        String sessionId = event.sessionId() != null ? event.sessionId() : "default";
+        String sessionId = event.sessionId() != null ? event.sessionId() : DEFAULT_SESSION;
         String userText  = promptText(event);
         if (userText == null || userText.isBlank()) return;
 
         // MK8 console contract: chat.typing reads {"text"}, chat.thinking reads {"status"}.
-        PluginBase.publishSafe(KernelEvent.withSession("chat.typing",
+        PluginBase.publishSafe(KernelEvent.withSession(EVT_CHAT_TYPING,
                 KernelEvent.MAPPER.writeValueAsString(Map.of("text", "⏳")), config.id(), sessionId), out);
 
         if (config.thinking() != null) {
             String status = config.thinking().path("background").asText("⏳ Thinking...");
-            PluginBase.publishSafe(KernelEvent.withSession("chat.thinking",
+            PluginBase.publishSafe(KernelEvent.withSession(EVT_CHAT_THINKING,
                     KernelEvent.MAPPER.writeValueAsString(Map.of("status", status)), config.id(), sessionId), out);
         }
 
@@ -183,7 +225,7 @@ public class AgentCore {
         synchronized (sessionLocks.computeIfAbsent(sessionId, k -> new Object())) {
             boolean isNew = !sessionMemories.containsKey(sessionId);
             ChatMemory memory = sessionMemories.computeIfAbsent(sessionId,
-                    k -> MessageWindowChatMemory.withMaxMessages(40));
+                    k -> MessageWindowChatMemory.withMaxMessages(MAX_HISTORY));
             if (isNew && store != null) store.loadInto(sessionId, memory);
             memory.add(UserMessage.from(userText));
             new MissionRunner(this, router, blackboard)
@@ -211,7 +253,7 @@ public class AgentCore {
         // The agent simply runs the mission; busy/idle status feeds load-aware bidding.
         Thread.ofVirtual().start(() -> {
             activeMissions.incrementAndGet();
-            publishAgentStatus("agent.busy", out);
+            publishAgentStatus(EVT_AGENT_BUSY, out);
             try {
                 runActualMission(event, out);
             } catch (Exception e) {
@@ -219,7 +261,7 @@ public class AgentCore {
                 try { publishError(e.getMessage(), false, event.correlationId(), event.sessionId(), out); }
                 catch (Exception ignored) {}
             } finally {
-                if (activeMissions.decrementAndGet() == 0) publishAgentStatus("agent.idle", out);
+                if (activeMissions.decrementAndGet() == 0) publishAgentStatus(EVT_AGENT_IDLE, out);
             }
         });
     }
@@ -231,22 +273,21 @@ public class AgentCore {
         String sessionId = event.sessionId();
 
         if (sessionId != null) {
-            String cacheKey = "research.cache." + normalizeQueryKey(userMsg);
-            String cached   = blackboard.read(cacheKey, "session", sessionId, out);
+            String cached = blackboard.read(researchCacheKey(userMsg), SCOPE_SESSION, sessionId, out);
             if (cached != null) {
                 log("← blackboard cache hit for: " + truncate(userMsg, 60));
                 String resultPayload = KernelEvent.MAPPER.writeValueAsString(Map.of("result", cached));
-                PluginBase.publish(KernelEvent.withCorrelation("capability.result", resultPayload,
+                PluginBase.publish(KernelEvent.withCorrelation(EVT_CAPABILITY_RESULT, resultPayload,
                         config.id(), corrId, sessionId), out);
                 return cached;
             }
         }
 
-        ChatMemory memory = MessageWindowChatMemory.withMaxMessages(40);
+        ChatMemory memory = MessageWindowChatMemory.withMaxMessages(MAX_HISTORY);
 
         String missionQuery = userMsg;
         if (sessionId != null) {
-            String context = blackboard.read("task.context", "session", sessionId, out);
+            String context = blackboard.read(BB_KEY_TASK_CONTEXT, SCOPE_SESSION, sessionId, out);
             if (context != null) {
                 log("← context loaded for session " + sessionId);
                 missionQuery = "Conversation context (recent discussion — use this to resolve pronouns "
@@ -286,25 +327,7 @@ public class AgentCore {
                 "score",         bidWeight,
                 "load",          load,
                 "correlationId", corrId != null ? corrId : ""));
-        PluginBase.publish(KernelEvent.of("capability.bid.response", bidPayload, config.id()), out);
-    }
-
-    // ── Capability registration ───────────────────────────────────────────────
-
-    void registerCapabilities(OutputStream out) throws Exception {
-        for (AgentConfig.CapabilityDecl cap : config.capabilitiesOrEmpty()) {
-            var reg = new LinkedHashMap<String, Object>();
-            reg.put("name",      cap.name());
-            reg.put("pluginId",  config.id());
-            reg.put("version",   cap.version() != null ? cap.version() : "1.0.0");
-            reg.put("exclusive", cap.exclusiveOrDefault());
-            reg.put("bidWeight", cap.bidWeightOrDefault());
-            if (cap.triggerEvent() != null) reg.put("triggerEvent", cap.triggerEvent());
-            if (cap.tags() != null)         reg.put("tags", cap.tags());
-            KernelEvent.writeFrame(out, KernelEvent.MAPPER.writeValueAsString(
-                    KernelEvent.of("capability.register", KernelEvent.MAPPER.writeValueAsString(reg), config.id())));
-        }
-        log("Capabilities registered: " + config.capabilitiesOrEmpty().size());
+        PluginBase.publish(KernelEvent.of(EVT_CAPABILITY_BID_RESPONSE, bidPayload, config.id()), out);
     }
 
     // ── Agent busy/idle status ────────────────────────────────────────────────
@@ -323,11 +346,11 @@ public class AgentCore {
         if (chatMode) {
             String payload = KernelEvent.MAPPER.writeValueAsString(Map.of("response", text));
             PluginBase.publish(
-                    KernelEvent.withSession("chat.response", payload, config.id(), originalSession), out);
+                    KernelEvent.withSession(EVT_CHAT_RESPONSE, payload, config.id(), originalSession), out);
         } else {
             String resultPayload = KernelEvent.MAPPER.writeValueAsString(Map.of("result", text));
             PluginBase.publish(
-                    KernelEvent.withCorrelation("capability.result", resultPayload,
+                    KernelEvent.withCorrelation(EVT_CAPABILITY_RESULT, resultPayload,
                             config.id(), correlationId, originalSession), out);
         }
     }
@@ -337,16 +360,21 @@ public class AgentCore {
         if (chatMode) {
             String payload = KernelEvent.MAPPER.writeValueAsString(Map.of(
                     "response", "The AI service is temporarily unavailable. Please try again."));
-            PluginBase.publish(KernelEvent.withSession("chat.response", payload,
+            PluginBase.publish(KernelEvent.withSession(EVT_CHAT_RESPONSE, payload,
                     config.id(), originalSession), out);
         } else {
             String ep = KernelEvent.MAPPER.writeValueAsString(Map.of("reason", msg));
-            PluginBase.publish(KernelEvent.withCorrelation("capability.error", ep,
+            PluginBase.publish(KernelEvent.withCorrelation(EVT_CAPABILITY_ERROR, ep,
                     config.id(), correlationId, originalSession), out);
         }
     }
 
     // ── Helpers ───────────────────────────────────────────────────────────────
+
+    /** Blackboard key for a cached research result of the given query (shared by chat + capability paths). */
+    String researchCacheKey(String query) {
+        return BB_KEY_RESEARCH_CACHE_PREFIX + normalizeQueryKey(query);
+    }
 
     static String buildCapabilityQuery(JsonNode payload) throws Exception {
         if (!payload.has("input")) return KernelEvent.MAPPER.writeValueAsString(payload);
@@ -378,13 +406,7 @@ public class AgentCore {
         return s != null && s.length() > max ? s.substring(0, max) + "…" : s;
     }
 
-    void log(String msg) {
-        String id = config != null ? config.id().toUpperCase() : "AGENT";
-        System.out.println("[" + id + "] " + msg);
-    }
-
-    void logError(String msg) {
-        String id = config != null ? config.id().toUpperCase() : "AGENT";
-        System.err.println("[" + id + "] ERROR: " + msg);
-    }
+    void log(String msg)      { Log.info(msg);  }
+    void logError(String msg) { Log.error(msg); }
+    void logDebug(String msg) { Log.debug(msg); }   // suppressed unless Log.level(DEBUG)
 }

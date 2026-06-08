@@ -58,7 +58,7 @@ public class Start {
             launchBackground(kernelDir, kernelLog,
                     "jbang", "Kernel.java",
                     "--logs=" + logsDir.getAbsolutePath(),
-                    "IdempotencyInterceptor", "CapabilityInterceptor", "PluginInterceptor", "BlackboardInterceptor");
+                    "IdempotencyInterceptor", "CapabilityInterceptor", "PluginInterceptor", "BlackboardInterceptor", "LogInterceptor");
 
             waitForSocket();
 

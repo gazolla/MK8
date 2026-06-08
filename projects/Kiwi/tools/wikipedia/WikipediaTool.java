@@ -58,7 +58,7 @@ public class WikipediaTool {
             HttpRequest request = HttpRequest.newBuilder()
                     .uri(URI.create(url))
                     .header("Accept", "application/json")
-                    .header("User-Agent", "MK7-WikipediaTool/1.0 (microkernel research agent)")
+                    .header("User-Agent", "Kiwi-WikipediaTool/1.0 (microkernel research agent)")
                     .GET()
                     .build();
 

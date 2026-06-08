@@ -17,6 +17,14 @@ import java.util.concurrent.*;
  */
 public class CapabilityRouter {
 
+    // ── Event types ─────────────────────────────────────────────────────────────
+    static final String EVT_CAPABILITY_INVOKE   = "capability.invoke";
+
+    // ── Tuning ──────────────────────────────────────────────────────────────────
+    static final String PREFIX_AGENT_CAPABILITY = "agent.";   // sub-agent capabilities (long missions)
+    static final long   TOOL_TIMEOUT_SECONDS    = 90;
+    static final long   AGENT_TIMEOUT_SECONDS   = 600;
+
     private final AgentConfig config;
     private final AgentCore core;
     final Map<String, CompletableFuture<String>> pendingInvocations = new ConcurrentHashMap<>();
@@ -71,7 +79,8 @@ public class CapabilityRouter {
 
         // Agents may run long missions; tools are quicker. The timeout also absorbs
         // on-demand spawn latency, since the kernel queues the invoke until ready.
-        long timeoutSec = capabilityName.startsWith("agent.") ? 600 : 90;
+        long timeoutSec = capabilityName.startsWith(PREFIX_AGENT_CAPABILITY)
+                ? AGENT_TIMEOUT_SECONDS : TOOL_TIMEOUT_SECONDS;
         return trySingleInvoke(capabilityName, argsJson, sessionId, out, timeoutSec);
     }
 
@@ -90,7 +99,7 @@ public class CapabilityRouter {
             ));
 
             PluginBase.publish(
-                    KernelEvent.withCorrelation("capability.invoke", invocationJson,
+                    KernelEvent.withCorrelation(EVT_CAPABILITY_INVOKE, invocationJson,
                             config.id(), corrId, sessionId),
                     out);
             return future.get(timeoutSec, TimeUnit.SECONDS);

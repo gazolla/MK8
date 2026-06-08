@@ -3,6 +3,7 @@
 //DEPS com.fasterxml.jackson.core:jackson-databind:2.17.2
 //DEPS com.fasterxml.jackson.datatype:jackson-datatype-jsr310:2.17.2
 //SOURCES ../../../kernel/KernelEvent.java
+//SOURCES ../../../kernel/Log.java
 //SOURCES ../../../kernel/interceptors/plugin/PluginConfig.java
 //SOURCES ../../../kernel/interceptors/plugin/PluginBase.java
 
@@ -70,7 +71,7 @@ public class LogEmitter {
     }
 
     void start() throws Exception {
-        System.out.println("[EMITTER] Starting (paused — waiting for Play)...");
+        Log.rawInfo("[EMITTER] Starting (paused — waiting for Play)...");
         PluginBase.run("plugin.json", KernelEvent.DEFAULT_SOCKET, this::handle);
     }
 
@@ -78,6 +79,7 @@ public class LogEmitter {
 
     void handle(String json, OutputStream out) throws Exception {
         this.kernelOut = out;
+        Log.configure(config.id(), out);
         KernelEvent event = KernelEvent.MAPPER.readValue(json, KernelEvent.class);
         switch (event.type()) {
             case "storm.control"     -> handleControl(event);
@@ -93,13 +95,13 @@ public class LogEmitter {
         if ("rate".equals(action)) {
             int val = p.path("value").asInt(0);
             rateOverride.set(val);
-            System.out.println("[EMITTER] Rate override → " + val + " logs/sec");
+            Log.rawInfo("[EMITTER] Rate override → " + val + " logs/sec");
         }
     }
 
     void onStart() {
         if (active.compareAndSet(false, true)) {
-            System.out.println("[EMITTER] Started.");
+            Log.rawInfo("[EMITTER] Started.");
             Thread.ofVirtual().start(this::emitLoop);
             Thread.ofVirtual().start(this::waveLoop);
         }
@@ -107,7 +109,7 @@ public class LogEmitter {
 
     void onStop() {
         if (active.compareAndSet(true, false))
-            System.out.println("[EMITTER] Stopped.");
+            Log.rawInfo("[EMITTER] Stopped.");
     }
 
     // ── Emission loops ────────────────────────────────────────────────────────
@@ -126,7 +128,7 @@ public class LogEmitter {
             try { Thread.sleep(WAVE_INTERVAL); } catch (InterruptedException e) { break; }
             if (!active.get()) break;
             int next = waveIndex.incrementAndGet() % WAVE_RATES.length;
-            System.out.println("[EMITTER] Wave → " + WAVE_RATES[next] + " logs/sec");
+            Log.rawInfo("[EMITTER] Wave → " + WAVE_RATES[next] + " logs/sec");
         }
     }
 
@@ -160,7 +162,7 @@ public class LogEmitter {
                     kernelOut);
 
         } catch (Exception e) {
-            System.err.println("[EMITTER] Error: " + e.getMessage());
+            Log.rawError("[EMITTER] Error: " + e.getMessage());
         }
     }
 

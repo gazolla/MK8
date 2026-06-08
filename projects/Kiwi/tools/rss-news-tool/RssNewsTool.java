@@ -27,6 +27,7 @@ import java.util.Map;
 import java.util.Set;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
+import java.util.zip.GZIPInputStream;
 
 import org.w3c.dom.Document;
 import org.w3c.dom.Element;
@@ -43,6 +44,11 @@ public class RssNewsTool {
             .build();
 
     static final Duration REQUEST_TIMEOUT = Duration.ofSeconds(15);
+
+    // Realistic browser UA — anti-bot defenses (Cloudflare etc.) reject obvious bot agents.
+    static final String USER_AGENT =
+            "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 "
+            + "(KHTML, like Gecko) Chrome/124.0 Safari/537.36";
 
     // Common RSS/Atom feed paths to try
     static final String[] COMMON_FEED_PATHS = {
@@ -159,21 +165,10 @@ public class RssNewsTool {
      */
     static String discoverFeedUrl(String siteUrl) {
         try {
-            HttpRequest request = HttpRequest.newBuilder()
-                    .uri(URI.create(siteUrl))
-                    .header("User-Agent", "MK7-RssNewsTool/1.0")
-                    .header("Accept", "text/html,application/xhtml+xml")
-                    .timeout(REQUEST_TIMEOUT)
-                    .GET()
-                    .build();
-
-            HttpResponse<String> response = HTTP.send(request, HttpResponse.BodyHandlers.ofString());
-
-            if (response.statusCode() != 200) {
+            String body = fetch(siteUrl, "text/html,application/xhtml+xml");
+            if (body == null) {
                 return null;
             }
-
-            String body = response.body();
 
             // Check if the response itself is an RSS/Atom feed
             if (isRssContent(body)) {
@@ -203,25 +198,45 @@ public class RssNewsTool {
     static String tryCommonPaths(String siteUrl) {
         for (String path : COMMON_FEED_PATHS) {
             String candidateUrl = siteUrl + path;
-            try {
-                HttpRequest request = HttpRequest.newBuilder()
-                        .uri(URI.create(candidateUrl))
-                        .header("User-Agent", "MK7-RssNewsTool/1.0")
-                        .header("Accept", "application/rss+xml, application/atom+xml, application/xml, text/xml")
-                        .timeout(REQUEST_TIMEOUT)
-                        .GET()
-                        .build();
-
-                HttpResponse<String> response = HTTP.send(request, HttpResponse.BodyHandlers.ofString());
-
-                if (response.statusCode() == 200 && isRssContent(response.body())) {
-                    return candidateUrl;
-                }
-            } catch (Exception e) {
-                // Try next path
+            String body = fetch(candidateUrl, "application/rss+xml, application/atom+xml, application/xml, text/xml");
+            if (body != null && isRssContent(body)) {
+                return candidateUrl;
             }
         }
         return null;
+    }
+
+    /**
+     * GETs a URL and returns the body as a UTF-8 string, transparently decoding gzip.
+     * Some CDNs (e.g. metropoles.com) return Content-Encoding: gzip even when not requested;
+     * the JDK HttpClient does not auto-decompress, so the raw bytes would corrupt the XML prolog.
+     * Returns null on non-200 or any failure (callers fall through to the next strategy).
+     */
+    static String fetch(String url, String accept) {
+        try {
+            HttpRequest request = HttpRequest.newBuilder()
+                    .uri(URI.create(url))
+                    .header("User-Agent", USER_AGENT)
+                    .header("Accept", accept)
+                    .timeout(REQUEST_TIMEOUT)
+                    .GET()
+                    .build();
+
+            HttpResponse<byte[]> response = HTTP.send(request, HttpResponse.BodyHandlers.ofByteArray());
+            if (response.statusCode() != 200) return null;
+
+            byte[] body = response.body();
+            boolean gzipped = response.headers().firstValue("Content-Encoding")
+                    .map(e -> e.toLowerCase().contains("gzip")).orElse(false);
+            if (gzipped) {
+                try (GZIPInputStream gz = new GZIPInputStream(new ByteArrayInputStream(body))) {
+                    body = gz.readAllBytes();
+                }
+            }
+            return new String(body, StandardCharsets.UTF_8);
+        } catch (Exception e) {
+            return null;
+        }
     }
 
     /**
@@ -235,26 +250,38 @@ public class RssNewsTool {
     }
 
     /**
+     * Detects an anti-bot interstitial (Cloudflare "Just a moment...", JS challenge) that
+     * returns HTTP 200 with an HTML body where a feed was expected.
+     */
+    static boolean looksLikeChallenge(String content) {
+        if (content == null || content.isBlank()) return false;
+        String lower = content.toLowerCase();
+        return lower.contains("just a moment")
+            || lower.contains("cf-browser-verification")
+            || lower.contains("challenge-platform")
+            || lower.contains("enable javascript and cookies");
+    }
+
+    /**
      * Parses an RSS or Atom feed and extracts news items.
      */
     static List<Map<String, String>> parseFeed(String feedUrl) throws Exception {
         List<Map<String, String>> items = new ArrayList<>();
 
-        HttpRequest request = HttpRequest.newBuilder()
-                .uri(URI.create(feedUrl))
-                .header("User-Agent", "MK7-RssNewsTool/1.0")
-                .header("Accept", "application/rss+xml, application/atom+xml, application/xml, text/xml")
-                .timeout(REQUEST_TIMEOUT)
-                .GET()
-                .build();
-
-        HttpResponse<String> response = HTTP.send(request, HttpResponse.BodyHandlers.ofString());
-
-        if (response.statusCode() != 200) {
+        String xml = fetch(feedUrl, "application/rss+xml, application/atom+xml, application/xml, text/xml");
+        if (xml == null) {
             return items;
         }
 
-        String xml = response.body();
+        // Strip BOM / leading whitespace before the XML prolog. A stray byte before
+        // <?xml triggers the strict parser's "content not allowed in prolog" fatal error.
+        int lt = xml.indexOf('<');
+        if (lt > 0) xml = xml.substring(lt);
+
+        // Anti-bot challenge or plain HTML returned instead of a feed → no items (handled gracefully upstream).
+        if (looksLikeChallenge(xml) || !isRssContent(xml)) {
+            return items;
+        }
 
         DocumentBuilderFactory factory = DocumentBuilderFactory.newInstance();
         factory.setFeature("http://apache.org/xml/features/disallow-doctype-decl", true);
